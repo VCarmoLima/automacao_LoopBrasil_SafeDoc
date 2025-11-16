@@ -4,6 +4,7 @@ import time
 import json
 import base64
 import datetime
+import logging
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -13,6 +14,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 
 load_dotenv()
+
+logging.basicConfig(
+    filename='automacao.log',
+    filemode='a',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 # --- Configurações de Arquivos ---
 NOME_ARQUIVO_EXCEL = "Base_TESTE.xlsm"
@@ -38,28 +47,61 @@ URL_BANCO = os.getenv("URL_BANCO")
 USUARIO_BANCO = os.getenv("USUARIO_BANCO")
 SENHA_BANCO = os.getenv("SENHA_BANCO")
 
-# --- XPATHs ---
-XPATH_LOGIN_USUARIO = "/html/body/div/main/div/div[2]/form/div/div[2]/div/input"
-XPATH_LOGIN_SENHA = "/html/body/div/main/div/div[2]/form/div/div[3]/div/input"
-XPATH_LOGIN_BOTAO = "/html/body/div/main/div/div[2]/form/div/div[4]/input[1]"
-XPATH_GCA_1 = "/html/body/main/section/form/div/div/div/div/div/div/div[1]/div[2]/div/nobr/div/div[1]/span[1]/img"
-XPATH_GCA_2 = "/html/body/main/section/form/div/div/div/div/div/div/div[1]/div[2]/div/nobr/div/div[2]/div[3]/span[1]/img[2]"
-XPATH_GCA_3 = "/html/body/main/section/form/div/div/div/div/div/div/div[1]/div[2]/div/nobr/div/div[2]/div[4]/div[2]/img"
-# --- IDs Iframes Aninhados ---
-IFRAME_EXTERNO_ID = "ifrmForm"
-IFRAME_INTERNO_ID = "ifrmObject"
-# --- IDs e XPATHs do Formulário ---
-FORM_UPLOAD_INPUT_ID = "_ctl0_ContentPlaceHolder_IDX_FILE"
-XPATH_FORM_STATUS_SELECT = "/html/body/form/div/div/div/div/div[2]/div[3]/select"
-XPATH_FORM_DATA = "/html/body/form/div/div/div/div/div[2]/div[4]/div/input"
-XPATH_FORM_CONTRATO = "/html/body/form/div/div/div/div/div[2]/div[5]/input"
-XPATH_FORM_PLACA = "/html/body/form/div/div/div/div/div[2]/div[6]/input"
-XPATH_FORM_TIPO_DESPESA_SELECT = "/html/body/form/div/div/div/div/div[2]/div[7]/select"
-XPATH_FORM_VALOR = "/html/body/form/div/div/div/div/div[2]/div[8]/input"
-XPATH_FORM_CAIXA_ARQUIVO = "/html/body/form/div/div/div/div/div[2]/div[9]/input"
-XPATH_FORM_OBSERVACAO = "/html/body/form/div/div/div/div/div[2]/div[10]/input"
-XPATH_FORM_SALVAR_BOTAO = "/html/body/form/div/div/div/div/div[3]/input"
-# -----------------------------------------------------
+VALOR_RANGES = {
+    "leve": [
+        (200, 241),
+        (500, 468),
+        (700, 620),
+        (1000, 900),
+        (9999, 1320)
+    ],
+    "moto": [
+        (200, 230),
+        (500, 438),
+        (700, 580),
+        (1000, 795),
+        (9999, 880)
+    ],
+    "pesado": [
+        (200, 665),
+        (500, 1045),
+        (700, 2020),
+        (1000, 3235),
+        (9999, 4175)
+    ]
+}
+
+SELECTORS = {
+    "google_maps": {
+        "km_xpath": "/html/body/div[1]/div[3]/div[9]/div[9]/div/div/div[1]/div[2]/div/div[1]/div/div/div[5]/div[1]/div[1]/div/div[1]/div[2]/div"
+    },
+    "login": {
+        "usuario": "/html/body/div/main/div/div[2]/form/div/div[2]/div/input",
+        "senha": "/html/body/div/main/div/div[2]/form/div/div[3]/div/input",
+        "botao": "/html/body/div/main/div/div[2]/form/div/div[4]/input[1]"
+    },
+    "gca_menu": {
+        "link_1": "/html/body/main/section/form/div/div/div/div/div/div/div[1]/div[2]/div/nobr/div/div[1]/span[1]/img",
+        "link_2": "/html/body/main/section/form/div/div/div/div/div/div/div[1]/div[2]/div/nobr/div/div[2]/div[3]/span[1]/img[2]",
+        "link_3": "/html/body/main/section/form/div/div/div/div/div/div/div[1]/div[2]/div/nobr/div/div[2]/div[4]/div[2]/img"
+    },
+    "iframes": {
+        "externo": "ifrmForm",
+        "interno": "ifrmObject"
+    },
+    "form_upload": {
+        "input_arquivo": "_ctl0_ContentPlaceHolder_IDX_FILE",
+        "select_status": "/html/body/form/div/div/div/div/div[2]/div[3]/select",
+        "input_data": "/html/body/form/div/div/div/div/div[2]/div[4]/div/input",
+        "input_contrato": "/html/body/form/div/div/div/div/div[2]/div[5]/input",
+        "input_placa": "/html/body/form/div/div/div/div/div[2]/div[6]/input",
+        "select_tipo_despesa": "/html/body/form/div/div/div/div/div[2]/div[7]/select",
+        "input_valor": "/html/body/form/div/div/div/div/div[2]/div[8]/input",
+        "input_caixa_arquivo": "/html/body/form/div/div/div/div/div[2]/div[9]/input",
+        "input_observacao": "/html/body/form/div/div/div/div/div[2]/div[10]/input",
+        "botao_salvar": "/html/body/form/div/div/div/div/div[3]/input"
+    }
+}
 
 def configurar_driver(headless=True):
     chrome_options = Options()
@@ -82,13 +124,13 @@ def configurar_driver(headless=True):
         driver = webdriver.Chrome(options=chrome_options)
         return driver
     except Exception as e:
-        print(f"\nERRO CRÍTICO: Falha ao iniciar o Selenium: {e}")
+        logging.critical(f"Falha ao iniciar o Selenium: {e}", exc_info=True)
         return None
 
 
 def extrair_km_do_mapa(driver):
     try:
-        xpath_km = "/html/body/div[1]/div[3]/div[9]/div[9]/div/div/div[1]/div[2]/div/div[1]/div/div/div[5]/div[1]/div[1]/div/div[1]/div[2]/div"
+        xpath_km = SELECTORS["google_maps"]["km_xpath"]
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, xpath_km)))
         km_element = driver.find_element(By.XPATH, xpath_km)
         km_bruto_texto = km_element.text
@@ -101,40 +143,23 @@ def extrair_km_do_mapa(driver):
         return km_num, km_str_arquivo
 
     except Exception as e:
-        print(f"Não foi possível extrair o KM da página com o XPATH fornecido: {e}")
+        logging.warning(f"Não foi possível extrair o KM da página com o XPATH fornecido: {e}")
         return None, "KM_NAO_ENCONTRADO"
-
 
 def get_valor_por_range(categoria, km_numerico):
     if km_numerico is None:
         return "VALOR_PENDENTE"
-    km = km_numerico
-    try:
-        categoria = categoria.strip().lower()
-        if categoria == "leve":
-            if 1 <= km <= 200: return 241
-            elif 201 <= km <= 500: return 468
-            elif 501 <= km <= 700: return 620
-            elif 701 <= km <= 1000: return 900
-            elif 1001 <= km <= 9999: return 1320
-        elif categoria == "moto":
-            if 1 <= km <= 200: return 230
-            elif 201 <= km <= 500: return 438
-            elif 501 <= km <= 700: return 580
-            elif 701 <= km <= 1000: return 795
-            elif 1001 <= km <= 9999: return 880
-        elif categoria == "pesado":
-            if 1 <= km <= 200: return 665
-            elif 201 <= km <= 500: return 1045
-            elif 501 <= km <= 700: return 2020
-            elif 701 <= km <= 1000: return 3235
-            elif 1001 <= km <= 9999: return 4175
 
-        return "VALOR_NAO_ENCONTRADO"
-    except Exception as e:
-        print(f"Erro ao calcular valor: {e}")
-        return "VALOR_ERRO"
+    categoria_limpa = categoria.strip().lower()
 
+    ranges_da_categoria = VALOR_RANGES.get(categoria_limpa, [])
+
+    for limite_km, valor in ranges_da_categoria:
+        if km_numerico <= limite_km:
+            return valor
+
+    logging.warning(f"Valor não encontrado para Categoria: {categoria_limpa}, KM: {km_numerico}")
+    return "VALOR_NAO_ENCONTRADO"
 
 def gerar_pdf_mapa(driver, nome_arquivo_pdf):
     try:
@@ -148,48 +173,48 @@ def gerar_pdf_mapa(driver, nome_arquivo_pdf):
 
         return caminho_completo
     except Exception as e:
-        print(f"ERRO ao tentar gerar PDF do mapa: {e}")
+        logging.error(f"ERRO ao tentar gerar PDF do mapa: {e}", exc_info=True)
         return None
 
 
 def fazer_login_banco(driver):
     try:
         driver.get(URL_BANCO)
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, XPATH_LOGIN_USUARIO)))
-        driver.find_element(By.XPATH, XPATH_LOGIN_USUARIO).send_keys(USUARIO_BANCO)
-        driver.find_element(By.XPATH, XPATH_LOGIN_SENHA).send_keys(SENHA_BANCO)
-        driver.find_element(By.XPATH, XPATH_LOGIN_BOTAO).click()
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, SELECTORS["login"]["usuario"])))
+        driver.find_element(By.XPATH, SELECTORS["login"]["usuario"]).send_keys(USUARIO_BANCO)
+        driver.find_element(By.XPATH, SELECTORS["login"]["senha"]).send_keys(SENHA_BANCO)
+        driver.find_element(By.XPATH, SELECTORS["login"]["botao"]).click()
 
         WebDriverWait(driver, 20).until(
-            EC.element_to_be_clickable((By.XPATH, XPATH_GCA_1))
+            EC.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"]))
         )
         return True
     except Exception as e:
-        print(f"--- ERRO NA ETAPA DE LOGIN ---: {e}")
+        logging.error(f"--- ERRO NA ETAPA DE LOGIN ---: {e}", exc_info=True)
         return False
 
 
 def navegar_menu_gca(driver):
     try:
-        el1 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, XPATH_GCA_1)))
+        el1 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
         el1.click()
-        el2 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, XPATH_GCA_2)))
+        el2 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_2"])))
         el2.click()
-        el3 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, XPATH_GCA_3)))
+        el3 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_3"])))
         el3.click()
         return True
     except Exception as e:
-        print(f"--- ERRO NA NAVEGAÇÃO GCA ---: {e}")
+        logging.error(f"--- ERRO NA NAVEGAÇÃO GCA ---: {e}", exc_info=True)
         return False
 
 
 def preencher_formulario_com_upload(driver, dados_upload):
     try:
         WebDriverWait(driver, 20).until(
-            EC.element_to_be_clickable((By.XPATH, XPATH_FORM_STATUS_SELECT))
+            EC.element_to_be_clickable((By.XPATH, SELECTORS["form_upload"]["select_status"]))
         )
 
-        upload_element = driver.find_element(By.ID, FORM_UPLOAD_INPUT_ID)
+        upload_element = driver.find_element(By.ID, SELECTORS["form_upload"]["input_arquivo"])
         caminho_pdf = dados_upload['caminho_pdf']
 
         driver.execute_script(
@@ -210,59 +235,59 @@ def preencher_formulario_com_upload(driver, dados_upload):
         )
         time.sleep(2)
 
-        Select(driver.find_element(By.XPATH, XPATH_FORM_STATUS_SELECT)).select_by_visible_text("Cadastrar")
+        Select(driver.find_element(By.XPATH, SELECTORS["form_upload"]["select_status"])).select_by_visible_text("Cadastrar")
 
-        data_field = driver.find_element(By.XPATH, XPATH_FORM_DATA)
+        data_field = driver.find_element(By.XPATH, SELECTORS["form_upload"]["input_data"])
         data_field.clear()
         data_field.send_keys(dados_upload['data'])
 
-        driver.find_element(By.XPATH, XPATH_FORM_CONTRATO).send_keys(dados_upload['contrato'])
+        driver.find_element(By.XPATH, SELECTORS["form_upload"]["input_contrato"]).send_keys(dados_upload['contrato'])
 
         placa_sem_hifen = dados_upload['placa'].replace('-', '')
-        driver.find_element(By.XPATH, XPATH_FORM_PLACA).send_keys(placa_sem_hifen)
+        driver.find_element(By.XPATH, SELECTORS["form_upload"]["input_placa"]).send_keys(placa_sem_hifen)
 
-        Select(driver.find_element(By.XPATH, XPATH_FORM_TIPO_DESPESA_SELECT)).select_by_visible_text("018 - GUINCHO")
+        Select(driver.find_element(By.XPATH, SELECTORS["form_upload"]["select_tipo_despesa"])).select_by_visible_text("018 - GUINCHO")
 
         valor_formatado = f"{dados_upload['valor']},00"
-        driver.find_element(By.XPATH, XPATH_FORM_VALOR).send_keys(valor_formatado)
+        driver.find_element(By.XPATH, SELECTORS["form_upload"]["input_valor"]).send_keys(valor_formatado)
 
-        driver.find_element(By.XPATH, XPATH_FORM_CAIXA_ARQUIVO).send_keys("0")
-        driver.find_element(By.XPATH, XPATH_FORM_OBSERVACAO).send_keys(dados_upload['tipo_str'])
+        driver.find_element(By.XPATH, SELECTORS["form_upload"]["input_caixa_arquivo"]).send_keys("0")
+        driver.find_element(By.XPATH, SELECTORS["form_upload"]["input_observacao"]).send_keys(dados_upload['tipo_str'])
 
         time.sleep(1)
 
-        driver.find_element(By.XPATH, XPATH_FORM_SALVAR_BOTAO).click()
+        driver.find_element(By.XPATH, SELECTORS["form_upload"]["botao_salvar"]).click()
         time.sleep(4)
 
         return True
 
     except Exception as e:
-        print(f"\n--- ERRO NA ETAPA DE UPLOAD ---")
-        print(f"Falha ao fazer upload ou preencher o formulário: {e}")
+        logging.error("--- ERRO NA ETAPA DE UPLOAD ---")
+        logging.error(f"Falha ao fazer upload ou preencher o formulário: {e}", exc_info=True)
         return False
 
 
 def iniciar_automacao_completa():
-    print(f"--- Iniciando Automação Completa (Maps + Banco) ---")
+    logging.info("--- Iniciando Automação Completa (Maps + Banco) ---")
 
     lista_placas_log = []
     try:
-        print(f"Lendo log de placas já processadas: {NOME_ARQUIVO_LOG}")
+        logging.info(f"Lendo log de placas já processadas: {NOME_ARQUIVO_LOG}")
         df_log = pd.read_excel(NOME_ARQUIVO_LOG)
         lista_placas_log = df_log[COLUNA_PLACA].astype(str).tolist()
     except FileNotFoundError:
-        print("Arquivo de log não encontrado. Será criado um novo no final.")
+        logging.warning("Arquivo de log não encontrado. Será criado um novo no final.")
     except Exception as e:
-        print(f"Erro ao ler o arquivo de log: {e}. O script continuará.")
+        logging.warning(f"Erro ao ler o arquivo de log: {e}. O script continuará.")
 
     try:
-        print(f"Lendo o arquivo: {NOME_ARQUIVO_EXCEL} (Aba: {NOME_ABA})")
+        logging.info(f"Lendo o arquivo: {NOME_ARQUIVO_EXCEL} (Aba: {NOME_ABA})")
         df = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA)
     except FileNotFoundError:
-        print(f"ERRO: Arquivo {NOME_ARQUIVO_EXCEL} não encontrado!")
+        logging.critical(f"ERRO: Arquivo {NOME_ARQUIVO_EXCEL} não encontrado! Encerrando.")
         return
     except Exception as e:
-        print(f"ERRO ao ler a planilha: {e}")
+        logging.critical(f"ERRO ao ler a planilha: {e}", exc_info=True)
         return
 
     df[COLUNA_STATUS_SAFE_DOC] = df[COLUNA_STATUS_SAFE_DOC].astype(str)
@@ -276,6 +301,7 @@ def iniciar_automacao_completa():
     try:
         driver = configurar_driver(headless=True)
         if driver is None:
+            logging.critical("Driver do Selenium não pôde ser iniciado. Encerrando.")
             return
 
         for index, linha in df.iterrows():
@@ -297,15 +323,15 @@ def iniciar_automacao_completa():
                 teste_val = linha[COLUNA_TESTE]
 
             except KeyError as e:
-                print(f"--- ERRO (KeyError) ---")
-                print(f"Não encontrei a coluna com o nome: {e}")
+                logging.error("--- ERRO (KeyError) ---")
+                logging.error(f"Não encontrei a coluna com o nome: {e}")
                 break
 
             end1_url = end1.replace(" ", "+")
             end2_url = end2.replace(" ", "+")
             end3_url = end3.replace(" ", "+")
 
-            print(f"\n--- Processando Linha {index + 2} (Placa: {placa}, Categoria: {categoria}) ---")
+            logging.info(f"--- Processando Linha {index + 2} (Placa: {placa}, Categoria: {categoria}) ---")
 
             url_remocao = f"https://www.google.com/maps/dir/{end1_url}/{end2_url}/{end3_url}/{end1_url}"
             url_restituicao = f"https://www.google.com/maps/dir/{end1_url}/{end3_url}/{end1_url}/{end2_url}"
@@ -337,7 +363,7 @@ def iniciar_automacao_completa():
                 caminho_pdf_rem = gerar_pdf_mapa(driver, nome_arquivo)
                 if not caminho_pdf_rem:
                     sucesso_geral = False
-                    print(f"Falha ao gerar PDF de Remoção para {placa}.")
+                    logging.warning(f"Falha ao gerar PDF de Remoção para {placa}.")
 
             caminho_pdf_rest = None
             valor_rest = "N/A"
@@ -351,7 +377,7 @@ def iniciar_automacao_completa():
                 caminho_pdf_rest = gerar_pdf_mapa(driver, nome_arquivo)
                 if not caminho_pdf_rest:
                     sucesso_geral = False
-                    print(f"Falha ao gerar PDF de Restituição para {placa}.")
+                    logging.warning(f"Falha ao gerar PDF de Restituição para {placa}.")
 
             if sucesso_geral and (run_rem or run_rest):
 
@@ -369,15 +395,15 @@ def iniciar_automacao_completa():
                         nav_ok = navegar_menu_gca(driver)
                         if nav_ok:
                             try:
-                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, IFRAME_EXTERNO_ID)))
-                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, IFRAME_INTERNO_ID)))
+                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["externo"])))
+                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["interno"])))
 
                                 upload_sucesso_rem = preencher_formulario_com_upload(driver, dados_rem)
                                 if not upload_sucesso_rem:
                                     upload_sucesso_final = False
 
                             except Exception as e:
-                                print(f"ERRO ao focar no iframe ou preencher formulário: {e}")
+                                logging.error(f"ERRO ao focar no iframe ou preencher formulário: {e}", exc_info=True)
                                 upload_sucesso_final = False
                             finally:
                                 driver.switch_to.default_content()
@@ -398,15 +424,15 @@ def iniciar_automacao_completa():
                         nav_ok = navegar_menu_gca(driver)
                         if nav_ok:
                             try:
-                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, IFRAME_EXTERNO_ID)))
-                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, IFRAME_INTERNO_ID)))
+                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["externo"])))
+                                WebDriverWait(driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["interno"])))
 
                                 upload_sucesso_rest = preencher_formulario_com_upload(driver, dados_rest)
                                 if not upload_sucesso_rest:
                                     upload_sucesso_final = False
 
                             except Exception as e:
-                                print(f"ERRO ao focar no iframe ou preencher formulário: {e}")
+                                logging.error(f"ERRO ao focar no iframe ou preencher formulário: {e}", exc_info=True)
                                 upload_sucesso_final = False
                             finally:
                                 driver.switch_to.default_content()
@@ -417,30 +443,30 @@ def iniciar_automacao_completa():
 
                 if upload_sucesso_final:
                     novas_placas_sucesso.append(placa)
-                    print(f"Linha {index + 2} (Placa: {placa}) Processada e marcada para o log.")
+                    logging.info(f"Linha {index + 2} (Placa: {placa}) Processada e marcada para o log.")
                 else:
-                    print(f"Falha no UPLOAD. Linha {index + 2} (Placa: {placa}) NÃO será logada.")
-                    print("Interrompendo script devido a falha no upload.")
+                    logging.error(f"Falha no UPLOAD. Linha {index + 2} (Placa: {placa}) NÃO será logada.")
+                    logging.critical("Interrompendo script devido a falha no upload.")
                     break
 
             elif not (run_rem or run_rest):
-                print(f"Nenhuma ação necessária para a linha {index + 2}.")
+                logging.info(f"Nenhuma ação necessária para a linha {index + 2}.")
             else:
-                print(f"Falha no processo da linha {index + 2}. NÃO será logada.")
+                logging.warning(f"Falha no processo da linha {index + 2} (provavelmente PDF). NÃO será logada.")
 
     except Exception as e:
-        print(f"Ocorreu um erro inesperado no loop principal: {e}")
+        logging.critical(f"Ocorreu um erro inesperado no loop principal: {e}", exc_info=True)
 
     finally:
         if driver:
             driver.quit()
 
         if not novas_placas_sucesso:
-            print("\nNenhuma placa nova foi processada. Log não precisa ser atualizado.")
+            logging.info("Nenhuma placa nova foi processada. Log não precisa ser atualizado.")
             return
 
         try:
-            print(f"\nSalvando {len(novas_placas_sucesso)} novas placas no log...")
+            logging.info(f"Salvando {len(novas_placas_sucesso)} novas placas no log...")
 
             lista_placas_final = lista_placas_log + novas_placas_sucesso
             lista_placas_final_sem_duplicatas = list(dict.fromkeys(lista_placas_final))
@@ -448,11 +474,11 @@ def iniciar_automacao_completa():
 
             df_para_salvar.to_excel(NOME_ARQUIVO_LOG, index=False)
 
-            print(f"Arquivo de log '{NOME_ARQUIVO_LOG}' salvo com sucesso!")
+            logging.info(f"Arquivo de log '{NOME_ARQUIVO_LOG}' salvo com sucesso!")
 
         except Exception as e:
-            print(f"ERRO CRÍTICO AO SALVAR O LOG: {e}")
-            print("Suas placas processadas NÃO foram salvas no log.")
+            logging.critical(f"ERRO CRÍTICO AO SALVAR O LOG: {e}", exc_info=True)
+            logging.critical("Suas placas processadas NÃO foram salvas no log.")
 
 if __name__ == "__main__":
     iniciar_automacao_completa()
