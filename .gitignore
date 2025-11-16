@@ -1,0 +1,12 @@
+.env
+
+*.xlsx
+*.xlsm
+*.pdf
+log_processados.xlsx
+Base_TESTE.xlsm
+Base Restituições Vinícius.xlsm
+
+__pycache__/
+.venv/
+venv/
