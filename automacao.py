@@ -5,6 +5,8 @@ import json
 import base64
 import datetime
 import logging
+import telegram
+import asyncio
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -176,6 +178,75 @@ def gerar_pdf_mapa(driver, nome_arquivo_pdf):
         logging.error(f"ERRO ao tentar gerar PDF do mapa: {e}", exc_info=True)
         return None
 
+def enviar_resumo_telegram(lista_sucesso, lista_falha):
+    logging.info("Tentando enviar resumo para o Telegram...")
+
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not TOKEN or not CHAT_ID:
+        logging.warning("Token ou Chat ID do Telegram não configurados no .env. Resumo não será enviado.")
+        return
+
+    try:
+        mensagem = ["--- 🤖 Resumo da Automação ---"]
+
+        if lista_sucesso:
+            mensagem.append("\n✅ PLACAS PROCESSADAS COM SUCESSO:")
+            total_reembolsado = 0
+
+            for item in lista_sucesso:
+                mensagem.append(f"\nPlaca: {item['placa']}")
+
+                valor_rem_num = 0
+                if item['valor_rem'] not in ["N/A", "VALOR_PENDENTE", "VALOR_NAO_ENCONTRADO"]:
+                    try:
+                        valor_rem_num = int(item['valor_rem'])
+                    except ValueError:
+                        valor_rem_num = 0
+
+                valor_rest_num = 0
+                if item['valor_rest'] not in ["N/A", "VALOR_PENDENTE", "VALOR_NAO_ENCONTRADO"]:
+                    try:
+                        valor_rest_num = int(item['valor_rest'])
+                    except ValueError:
+                        valor_rest_num = 0
+
+                if valor_rem_num > 0:
+                    mensagem.append(f"  • Remoção: R$ {valor_rem_num},00")
+                    total_reembolsado += valor_rem_num
+
+                if valor_rest_num > 0:
+                    mensagem.append(f"  • Restituição: R$ {valor_rest_num},00")
+                    total_reembolsado += valor_rest_num
+
+            mensagem.append("\n-----------------------------------")
+            mensagem.append(f"💰 Total Reembolsado: R$ {total_reembolsado},00")
+
+        if lista_falha:
+            mensagem.append("\n\n❌ PLACAS QUE FALHARAM:")
+            for item in lista_falha:
+                mensagem.append(f"  • Placa: {item['placa']} (Motivo: {item['motivo']})")
+
+        total_s = len(lista_sucesso)
+        total_f = len(lista_falha)
+
+        if not lista_sucesso and not lista_falha:
+            mensagem.append("\nNenhuma placa nova foi encontrada para processar.")
+        else:
+            mensagem.append("\n-----------------------------------")
+            mensagem.append(f"Resumo: {total_s} sucesso(s) | {total_f} falha(s).")
+
+        async def enviar_async(token, chat_id, texto):
+            bot = telegram.Bot(token=token)
+            await bot.send_message(chat_id=chat_id, text=texto)
+
+        asyncio.run(enviar_async(TOKEN, CHAT_ID, "\n".join(mensagem)))
+
+        logging.info("Resumo enviado ao Telegram com sucesso!")
+
+    except Exception as e:
+        logging.error(f"Falha ao enviar mensagem para o Telegram: {e}", exc_info=True)
 
 def fazer_login_banco(driver):
     try:
@@ -193,7 +264,6 @@ def fazer_login_banco(driver):
         logging.error(f"--- ERRO NA ETAPA DE LOGIN ---: {e}", exc_info=True)
         return False
 
-
 def navegar_menu_gca(driver):
     try:
         el1 = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
@@ -206,7 +276,6 @@ def navegar_menu_gca(driver):
     except Exception as e:
         logging.error(f"--- ERRO NA NAVEGAÇÃO GCA ---: {e}", exc_info=True)
         return False
-
 
 def preencher_formulario_com_upload(driver, dados_upload):
     try:
@@ -266,7 +335,6 @@ def preencher_formulario_com_upload(driver, dados_upload):
         logging.error(f"Falha ao fazer upload ou preencher o formulário: {e}", exc_info=True)
         return False
 
-
 def iniciar_automacao_completa():
     logging.info("--- Iniciando Automação Completa (Maps + Banco) ---")
 
@@ -285,9 +353,11 @@ def iniciar_automacao_completa():
         df = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA)
     except FileNotFoundError:
         logging.critical(f"ERRO: Arquivo {NOME_ARQUIVO_EXCEL} não encontrado! Encerrando.")
+        enviar_resumo_telegram([], [{'placa': 'N/A', 'motivo': f'Arquivo {NOME_ARQUIVO_EXCEL} não encontrado'}])
         return
     except Exception as e:
         logging.critical(f"ERRO ao ler a planilha: {e}", exc_info=True)
+        enviar_resumo_telegram([], [{'placa': 'N/A', 'motivo': 'Erro ao ler planilha Excel'}])
         return
 
     df[COLUNA_STATUS_SAFE_DOC] = df[COLUNA_STATUS_SAFE_DOC].astype(str)
@@ -295,13 +365,17 @@ def iniciar_automacao_completa():
     df[COLUNA_CATEGORIA] = df[COLUNA_CATEGORIA].astype(str)
 
     driver = None
-    novas_placas_sucesso = []
+
+    placas_sucesso_info = []
+    placas_falha_info = []
+
     data_hoje_formatada = datetime.date.today().strftime("%d-%m-%Y")
 
     try:
         driver = configurar_driver(headless=True)
         if driver is None:
             logging.critical("Driver do Selenium não pôde ser iniciado. Encerrando.")
+            enviar_resumo_telegram([], [{'placa': 'N/A', 'motivo': 'Falha ao iniciar Selenium'}])
             return
 
         for index, linha in df.iterrows():
@@ -325,6 +399,7 @@ def iniciar_automacao_completa():
             except KeyError as e:
                 logging.error("--- ERRO (KeyError) ---")
                 logging.error(f"Não encontrei a coluna com o nome: {e}")
+                placas_falha_info.append({'placa': 'N/A', 'motivo': f'Coluna não encontrada: {e}'})
                 break
 
             end1_url = end1.replace(" ", "+")
@@ -350,9 +425,10 @@ def iniciar_automacao_completa():
                 run_rem = True
 
             sucesso_geral = True
-
             caminho_pdf_rem = None
             valor_rem = "N/A"
+            caminho_pdf_rest = None
+            valor_rest = "N/A"
 
             if run_rem:
                 driver.get(url_remocao)
@@ -364,9 +440,7 @@ def iniciar_automacao_completa():
                 if not caminho_pdf_rem:
                     sucesso_geral = False
                     logging.warning(f"Falha ao gerar PDF de Remoção para {placa}.")
-
-            caminho_pdf_rest = None
-            valor_rest = "N/A"
+                    placas_falha_info.append({'placa': placa, 'motivo': 'Falha ao gerar PDF de Remoção'})
 
             if run_rest and sucesso_geral:
                 driver.get(url_restituicao)
@@ -378,6 +452,7 @@ def iniciar_automacao_completa():
                 if not caminho_pdf_rest:
                     sucesso_geral = False
                     logging.warning(f"Falha ao gerar PDF de Restituição para {placa}.")
+                    placas_falha_info.append({'placa': placa, 'motivo': 'Falha ao gerar PDF de Restituição'})
 
             if sucesso_geral and (run_rem or run_rest):
 
@@ -442,11 +517,16 @@ def iniciar_automacao_completa():
                         upload_sucesso_final = False
 
                 if upload_sucesso_final:
-                    novas_placas_sucesso.append(placa)
+                    placas_sucesso_info.append({
+                        'placa': placa,
+                        'valor_rem': valor_rem,
+                        'valor_rest': valor_rest
+                    })
                     logging.info(f"Linha {index + 2} (Placa: {placa}) Processada e marcada para o log.")
                 else:
                     logging.error(f"Falha no UPLOAD. Linha {index + 2} (Placa: {placa}) NÃO será logada.")
                     logging.critical("Interrompendo script devido a falha no upload.")
+                    placas_falha_info.append({'placa': placa, 'motivo': 'Falha no Upload ao Portal'})
                     break
 
             elif not (run_rem or run_rest):
@@ -456,29 +536,33 @@ def iniciar_automacao_completa():
 
     except Exception as e:
         logging.critical(f"Ocorreu um erro inesperado no loop principal: {e}", exc_info=True)
+        placas_falha_info.append({'placa': 'ERRO GERAL', 'motivo': f'Script interrompido: {e}'})
 
     finally:
         if driver:
             driver.quit()
 
-        if not novas_placas_sucesso:
+        if not placas_sucesso_info:
             logging.info("Nenhuma placa nova foi processada. Log não precisa ser atualizado.")
-            return
+        else:
+            try:
+                logging.info(f"Salvando {len(placas_sucesso_info)} novas placas no log...")
 
-        try:
-            logging.info(f"Salvando {len(novas_placas_sucesso)} novas placas no log...")
+                placas_para_log_excel = [item['placa'] for item in placas_sucesso_info]
 
-            lista_placas_final = lista_placas_log + novas_placas_sucesso
-            lista_placas_final_sem_duplicatas = list(dict.fromkeys(lista_placas_final))
-            df_para_salvar = pd.DataFrame(lista_placas_final_sem_duplicatas, columns=[COLUNA_PLACA])
+                lista_placas_final = lista_placas_log + placas_para_log_excel
+                lista_placas_final_sem_duplicatas = list(dict.fromkeys(lista_placas_final))
+                df_para_salvar = pd.DataFrame(lista_placas_final_sem_duplicatas, columns=[COLUNA_PLACA])
 
-            df_para_salvar.to_excel(NOME_ARQUIVO_LOG, index=False)
+                df_para_salvar.to_excel(NOME_ARQUIVO_LOG, index=False)
 
-            logging.info(f"Arquivo de log '{NOME_ARQUIVO_LOG}' salvo com sucesso!")
+                logging.info(f"Arquivo de log '{NOME_ARQUIVO_LOG}' salvo com sucesso!")
 
-        except Exception as e:
-            logging.critical(f"ERRO CRÍTICO AO SALVAR O LOG: {e}", exc_info=True)
-            logging.critical("Suas placas processadas NÃO foram salvas no log.")
+            except Exception as e:
+                logging.critical(f"ERRO CRÍTICO AO SALVAR O LOG: {e}", exc_info=True)
+                logging.critical("Suas placas processadas NÃO foram salvas no log.")
+
+        enviar_resumo_telegram(placas_sucesso_info, placas_falha_info)
 
 if __name__ == "__main__":
     iniciar_automacao_completa()
