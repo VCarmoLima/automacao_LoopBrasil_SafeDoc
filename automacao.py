@@ -31,7 +31,7 @@ NOME_ABA = "Calculos"
 PASTA_DOWNLOADS = os.getenv("PASTA_DOWNLOADS")
 
 # --- Arquivo de Log ---
-NOME_ARQUIVO_LOG = "log_processados.xlsx"
+NOME_ARQUIVO_HISTORICO = "historico_processamento.xlsx"
 
 # --- Nomes das Colunas ---
 COLUNA_PLACA = "Placa"
@@ -196,7 +196,7 @@ def enviar_resumo_telegram(lista_sucesso, lista_falha):
             total_reembolsado = 0
 
             for item in lista_sucesso:
-                mensagem.append(f"\nPlaca: {item['placa']}")
+                mensagem.append(f"\nPlaca: {item[COLUNA_PLACA]}")
 
                 valor_rem_num = 0
                 if item['valor_rem'] not in ["N/A", "VALOR_PENDENTE", "VALOR_NAO_ENCONTRADO"]:
@@ -226,7 +226,8 @@ def enviar_resumo_telegram(lista_sucesso, lista_falha):
         if lista_falha:
             mensagem.append("\n\n❌ PLACAS QUE FALHARAM:")
             for item in lista_falha:
-                mensagem.append(f"  • Placa: {item['placa']} (Motivo: {item['motivo']})")
+                placa_falha = item.get(COLUNA_PLACA, item.get('placa', 'N/A'))
+                mensagem.append(f"  • Placa: {placa_falha} (Motivo: {item['motivo']})")
 
         total_s = len(lista_sucesso)
         total_f = len(lista_falha)
@@ -339,14 +340,17 @@ def iniciar_automacao_completa():
     logging.info("--- Iniciando Automação Completa (Maps + Banco) ---")
 
     lista_placas_log = []
+    df_historico_antigo = pd.DataFrame()
+
     try:
-        logging.info(f"Lendo log de placas já processadas: {NOME_ARQUIVO_LOG}")
-        df_log = pd.read_excel(NOME_ARQUIVO_LOG)
-        lista_placas_log = df_log[COLUNA_PLACA].astype(str).tolist()
+        logging.info(f"Lendo histórico de processamento: {NOME_ARQUIVO_HISTORICO}")
+        df_historico_antigo = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+        if not df_historico_antigo.empty:
+            lista_placas_log = df_historico_antigo[COLUNA_PLACA].astype(str).tolist()
     except FileNotFoundError:
-        logging.warning("Arquivo de log não encontrado. Será criado um novo no final.")
+        logging.warning("Arquivo de histórico não encontrado. Será criado um novo no final.")
     except Exception as e:
-        logging.warning(f"Erro ao ler o arquivo de log: {e}. O script continuará.")
+        logging.warning(f"Erro ao ler o arquivo de histórico: {e}. O script continuará.")
 
     try:
         logging.info(f"Lendo o arquivo: {NOME_ARQUIVO_EXCEL} (Aba: {NOME_ABA})")
@@ -427,8 +431,10 @@ def iniciar_automacao_completa():
             sucesso_geral = True
             caminho_pdf_rem = None
             valor_rem = "N/A"
+            km_str_rem = "N/A"
             caminho_pdf_rest = None
             valor_rest = "N/A"
+            km_str_rest = "N/A"
 
             if run_rem:
                 driver.get(url_remocao)
@@ -518,8 +524,10 @@ def iniciar_automacao_completa():
 
                 if upload_sucesso_final:
                     placas_sucesso_info.append({
-                        'placa': placa,
+                        COLUNA_PLACA: placa,
+                        'km_remocao': km_str_rem,
                         'valor_rem': valor_rem,
+                        'km_restituicao': km_str_rest,
                         'valor_rest': valor_rest
                     })
                     logging.info(f"Linha {index + 2} (Placa: {placa}) Processada e marcada para o log.")
@@ -543,24 +551,27 @@ def iniciar_automacao_completa():
             driver.quit()
 
         if not placas_sucesso_info:
-            logging.info("Nenhuma placa nova foi processada. Log não precisa ser atualizado.")
+            logging.info("Nenhuma placa nova foi processada. Histórico não precisa ser atualizado.")
         else:
             try:
-                logging.info(f"Salvando {len(placas_sucesso_info)} novas placas no log...")
+                logging.info(f"Salvando {len(placas_sucesso_info)} novas placas no histórico...")
 
-                placas_para_log_excel = [item['placa'] for item in placas_sucesso_info]
+                df_novas_placas = pd.DataFrame(placas_sucesso_info)
+                df_historico_completo = pd.concat([df_historico_antigo, df_novas_placas], ignore_index=True)
+                df_historico_completo.drop_duplicates(subset=[COLUNA_PLACA], keep='last', inplace=True)
 
-                lista_placas_final = lista_placas_log + placas_para_log_excel
-                lista_placas_final_sem_duplicatas = list(dict.fromkeys(lista_placas_final))
-                df_para_salvar = pd.DataFrame(lista_placas_final_sem_duplicatas, columns=[COLUNA_PLACA])
+                colunas_ordenadas = [
+                    COLUNA_PLACA, 'km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest'
+                ]
 
-                df_para_salvar.to_excel(NOME_ARQUIVO_LOG, index=False)
+                df_historico_final = df_historico_completo.reindex(columns=colunas_ordenadas)
+                df_historico_final.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
 
-                logging.info(f"Arquivo de log '{NOME_ARQUIVO_LOG}' salvo com sucesso!")
+                logging.info(f"Arquivo de histórico '{NOME_ARQUIVO_HISTORICO}' salvo com sucesso!")
 
             except Exception as e:
-                logging.critical(f"ERRO CRÍTICO AO SALVAR O LOG: {e}", exc_info=True)
-                logging.critical("Suas placas processadas NÃO foram salvas no log.")
+                logging.critical(f"ERRO CRÍTICO AO SALVAR O HISTÓRICO: {e}", exc_info=True)
+                logging.critical("Suas placas processadas NÃO foram salvas no histórico.")
 
         enviar_resumo_telegram(placas_sucesso_info, placas_falha_info)
 
