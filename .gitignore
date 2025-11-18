@@ -1,12 +1,22 @@
 .env
 
+*.txt
+log_*.txt
+automacao.log
+
 *.xlsx
 *.xlsm
-*.pdf
+*.xls
 log_processados.xlsx
 Base_TESTE.xlsm
 Base Restituições Vinícius.xlsm
+historico_processamento.xlsx
+Custo_Restituicao.xlsx
+
+*.pdf
 
 __pycache__/
+*.pyc
+
 .venv/
 venv/
