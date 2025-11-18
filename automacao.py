@@ -69,7 +69,6 @@ COLUNA_PLACA = "Placa"
 COLUNA_END1 = "Endereço transportadora"
 COLUNA_END2 = "Endereço Pátio"
 COLUNA_END3 = "Cidade convertida"
-COLUNA_STATUS = "SAFE DOC PRINT"
 COLUNA_TESTE = "Teste"
 COLUNA_STATUS_SAFE_DOC = "STATUS SAFE DOC"
 COLUNA_CONTRATO = "Contrato"
@@ -347,7 +346,6 @@ def iniciar_automacao_completa():
         return
 
     df[COLUNA_STATUS_SAFE_DOC] = df[COLUNA_STATUS_SAFE_DOC].astype(str)
-    df[COLUNA_STATUS] = df[COLUNA_STATUS].astype(str)
     df[COLUNA_CATEGORIA] = df[COLUNA_CATEGORIA].astype(str)
 
     placas_sucesso_info = []
@@ -358,7 +356,7 @@ def iniciar_automacao_completa():
         placa = "N/A"
         try:
             placa = str(linha[COLUNA_PLACA]).strip()
-            if str(linha[COLUNA_STATUS]).strip() == "OK" or placa in lista_placas_log:
+            if placa in lista_placas_log:
                 continue
 
             contrato = str(linha[COLUNA_CONTRATO]).strip()
