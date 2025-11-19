@@ -1,25 +1,27 @@
-import asyncio
-import base64
-import datetime
-import glob
-import json
-import logging
+import pandas as pd
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import pandas as pd
+import json
+import base64
+import datetime
+import logging
 import telegram
+import asyncio
+import glob
+import math
+from typing import cast
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as ec
-from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as ec
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import Select
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
+# --- Configurações ---
 NOME_ARQUIVO_EXCEL = "Base Restituições Vinícius.xlsm"
 NOME_ABA = "Calculos"
 PASTA_DOWNLOADS = os.getenv("PASTA_DOWNLOADS")
@@ -30,7 +32,6 @@ COLUNA_END1 = "Endereço transportadora"
 COLUNA_END2 = "Endereço Pátio"
 COLUNA_END3 = "Cidade convertida"
 COLUNA_TESTE = "Teste"
-COLUNA_STATUS_SAFE_DOC = "STATUS SAFE DOC"
 COLUNA_CONTRATO = "Contrato"
 COLUNA_CATEGORIA = "Categoria"
 
@@ -73,10 +74,12 @@ SELECTORS = {
         "input_valor": "/html/body/form/div/div/div/div/div[2]/div[8]/input",
         "input_caixa_arquivo": "/html/body/form/div/div/div/div/div[2]/div[9]/input",
         "input_observacao": "/html/body/form/div/div/div/div/div[2]/div[10]/input",
-        "botao_salvar": "/html/body/form/div/div/div/div/div[3]/input"
+        "botao_salvar": "/html/body/form/div/div/div/div/div[3]/input",
+        "mensagem_sucesso": "/html/body/form/div/div/div/div/div[4]/div/span"
     }
 }
 
+# --- Funções de Suporte ---
 def configurar_logger_dinamico():
     try:
         diretorio_script = os.path.dirname(os.path.abspath(__file__))
@@ -173,7 +176,7 @@ def gerar_pdf_mapa(driver, nome_arquivo_pdf):
         WebDriverWait(driver, 20).until(
             ec.visibility_of_element_located((By.TAG_NAME, SELECTORS["google_maps"]["canvas_map"]))
         )
-        time.sleep(1) # Necessário para renderização do Canvas
+        time.sleep(1)
         result = driver.execute_cdp_cmd("Page.printToPDF", {
             "landscape": False, "printBackground": True, "displayHeaderFooter": True,
             "marginTop": 1, "marginBottom": 1, "marginLeft": 0.5, "marginRight": 0.5
@@ -186,6 +189,7 @@ def gerar_pdf_mapa(driver, nome_arquivo_pdf):
         logging.error(f"ERRO ao gerar PDF: {e}", exc_info=True)
         return None
 
+# --- Funções do Site do Banco ---
 def fazer_login_banco(driver):
     try:
         driver.get(URL_BANCO)
@@ -212,9 +216,10 @@ def navegar_menu_gca(driver):
         logging.error(f"Erro Navegação GCA: {e}", exc_info=True)
         return False
 
-def preencher_formulario_com_upload(driver, dados_upload):
+def preencher_formulario_com_upload(driver, dados_upload, texto_anterior_ignorar=None):
     try:
         WebDriverWait(driver, 20).until(ec.element_to_be_clickable((By.XPATH, SELECTORS["form_upload"]["select_status"])))
+
         upload_element = driver.find_element(By.ID, SELECTORS["form_upload"]["input_arquivo"])
         caminho_pdf = dados_upload['caminho_pdf']
 
@@ -225,7 +230,7 @@ def preencher_formulario_com_upload(driver, dados_upload):
         time.sleep(1)
         upload_element.send_keys(caminho_pdf)
         driver.execute_script("validate(arguments[0]);", upload_element)
-        time.sleep(2)
+        time.sleep(1)
 
         Select(driver.find_element(By.XPATH, SELECTORS["form_upload"]["select_status"])).select_by_visible_text("Cadastrar")
 
@@ -259,11 +264,26 @@ def preencher_formulario_com_upload(driver, dados_upload):
 
         time.sleep(1)
         driver.find_element(By.XPATH, SELECTORS["form_upload"]["botao_salvar"]).click()
-        time.sleep(4) # Necessário para processamento do site do banco
-        return True
+
+        def mensagem_nova_apareceu(d):
+            try:
+                el = d.find_element(By.XPATH, SELECTORS["form_upload"]["mensagem_sucesso"])
+                txt = el.text.strip()
+                if "criado" in txt.lower():
+                    if texto_anterior_ignorar and txt == texto_anterior_ignorar:
+                        return False
+                    return txt
+                return False
+            except:
+                return False
+
+        texto_sucesso = WebDriverWait(driver, 30).until(mensagem_nova_apareceu)
+        logging.info(f"Sucesso Banco ({dados_upload['placa']}): {texto_sucesso}")
+        return True, texto_sucesso
+
     except Exception as e:
         logging.error(f"Erro Upload ({dados_upload['placa']}): {e}", exc_info=True)
-        return False
+        return False, None
 
 def enviar_resumo_telegram(lista_sucesso, lista_falha):
     logging.info("Enviando resumo Telegram...")
@@ -272,7 +292,7 @@ def enviar_resumo_telegram(lista_sucesso, lista_falha):
     if not token or not chat_id:
         return
     try:
-        mensagem = ["--- 🤖 Resumo da Automação (Híbrida) ---"]
+        mensagem = ["--- 🤖 Resumo da Automação (Híbrida + Lote) ---"]
         if lista_sucesso:
             mensagem.append("\n✅ SUCESSOS:")
             total_reembolsado = 0
@@ -302,8 +322,8 @@ def enviar_resumo_telegram(lista_sucesso, lista_falha):
     except Exception as e:
         logging.error(f"Falha Telegram: {e}")
 
+# --- Executores ---
 def processar_mapa_single_instance(driver, placa, contrato, categoria, url_mapa, tipo_acao, data_hoje):
-    """Usa o driver compartilhado para processar um mapa (Fase 1)."""
     try:
         driver.get(url_mapa)
         km_num, km_str = extrair_km_do_mapa(driver)
@@ -321,9 +341,10 @@ def processar_mapa_single_instance(driver, placa, contrato, categoria, url_mapa,
     except Exception as e:
         return False, None, None, str(e)
 
-def executar_apenas_upload_banco(dados_prontos):
-    """Abre driver exclusivo, faz login e upload (Fase 2)."""
+def executar_lote_banco(lote_dados):
     driver = None
+    resultados_lote = []
+
     try:
         driver = configurar_driver(headless=True)
         if not driver: raise Exception("Falha init driver Banco")
@@ -334,18 +355,38 @@ def executar_apenas_upload_banco(dados_prontos):
         WebDriverWait(driver, 10).until(ec.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["externo"])))
         WebDriverWait(driver, 10).until(ec.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["interno"])))
 
-        if not preencher_formulario_com_upload(driver, dados_prontos):
-            raise Exception("Falha Preenchimento/Salvar")
+        ultimo_texto_sucesso = None
 
-        return True, None
+        for dados in lote_dados:
+            logging.info(f"Iniciando upload no lote: {dados['placa']} ({dados['tipo_str']})")
+            sucesso, texto_msg = preencher_formulario_com_upload(driver, dados, ultimo_texto_sucesso)
+
+            if sucesso:
+                resultados_lote.append((True, None, dados))
+                ultimo_texto_sucesso = texto_msg
+            else:
+                resultados_lote.append((False, "Falha no preenchimento/salvamento", dados))
+
+        return resultados_lote
+
     except Exception as e:
-        return False, str(e)
+        msg_fatal = str(e)
+        for dados in lote_dados:
+            if not any(r[2] == dados for r in resultados_lote):
+                resultados_lote.append((False, f"Erro Fatal Sessão: {msg_fatal}", dados))
+        return resultados_lote
     finally:
         if driver: driver.quit()
 
+def distribuir_tarefas(lista_tarefas, num_workers):
+    tamanho = len(lista_tarefas)
+    if tamanho == 0: return []
+    chunk_size = math.ceil(tamanho / num_workers)
+    return [lista_tarefas[i:i + chunk_size] for i in range(0, tamanho, chunk_size)]
+
 def iniciar_automacao_completa():
     configurar_logger_dinamico()
-    logging.info("--- Iniciando Automação Híbrida (Maps Único + Banco Paralelo) ---")
+    logging.info("--- Iniciando Automação Híbrida OTIMIZADA (Lotes no Banco + Coluna Teste) ---")
 
     lista_placas_log = []
     try:
@@ -358,7 +399,7 @@ def iniciar_automacao_completa():
         df[COLUNA_PLACA] = df[COLUNA_PLACA].astype(str)
         df[COLUNA_CONTRATO] = df[COLUNA_CONTRATO].astype(str)
         df[COLUNA_CATEGORIA] = df[COLUNA_CATEGORIA].astype(str)
-        df[COLUNA_STATUS_SAFE_DOC] = df[COLUNA_STATUS_SAFE_DOC].astype(str)
+        df[COLUNA_TESTE] = pd.to_numeric(df[COLUNA_TESTE], errors='coerce').fillna(0).astype(int)
     except Exception as e:
         logging.critical(f"Erro Excel: {e}")
         return
@@ -377,7 +418,6 @@ def iniciar_automacao_completa():
         logging.info("Nada a processar.")
         return
 
-    # FASE 1: GOOGLE MAPS (SERIAL)
     logging.info(f"--- FASE 1: Maps para {len(registros_para_processar)} placas (Instância Única) ---")
     driver_maps = configurar_driver(headless=True)
 
@@ -386,8 +426,8 @@ def iniciar_automacao_completa():
             placa = str(row[COLUNA_PLACA]).strip()
             contrato = str(row[COLUNA_CONTRATO]).strip()
             categoria = str(row[COLUNA_CATEGORIA]).strip()
-            status = str(row[COLUNA_STATUS_SAFE_DOC]).strip()
-            teste = row.get(COLUNA_TESTE, 0)
+            teste_val = row[COLUNA_TESTE]
+
             end1 = str(row[COLUNA_END1]).replace(" ", "+")
             end2 = str(row[COLUNA_END2]).replace(" ", "+")
             end3 = str(row[COLUNA_END3]).replace(" ", "+")
@@ -395,8 +435,8 @@ def iniciar_automacao_completa():
             url_remocao = f"https://www.google.com/maps/dir/{end1}/{end2}/{end3}/{end1}"
             url_restituicao = f"https://www.google.com/maps/dir/{end1}/{end3}/{end1}/{end2}"
 
-            run_rem = status == "Pendente remoção" or teste == 1 or (status != "Pendente restituição")
-            run_rest = status == "Pendente restituição" or teste == 1
+            run_rem = True
+            run_rest = (teste_val == 1)
 
             if placa not in resultados_finais:
                 resultados_finais[placa] = {
@@ -437,30 +477,29 @@ def iniciar_automacao_completa():
         logging.critical("Não foi possível abrir driver do Maps.")
         return
 
-    # FASE 2: BANCO (PARALELO)
     logging.info(f"--- FASE 2: Uploads no Banco ({len(tarefas_upload)} itens) ---")
     QTD_WORKERS = 5
 
+    lotes = distribuir_tarefas(tarefas_upload, QTD_WORKERS)
+    logging.info(f"Tarefas distribuídas em {len(lotes)} lotes.")
+
     with ThreadPoolExecutor(max_workers=QTD_WORKERS) as executor:
         futures = {
-            executor.submit(executar_apenas_upload_banco, dados): dados
-            for dados in tarefas_upload
+            executor.submit(executar_lote_banco, lote): lote
+            for lote in lotes
         }
 
         for future in as_completed(futures):
-            dados_orig = futures[future]
-            placa_atual = dados_orig['placa']
-            tipo_atual = dados_orig['tipo_str']
-            try:
-                sucesso, erro_msg = future.result()
+            resultados_lote = future.result()
+            for sucesso, erro_msg, dados_orig in resultados_lote:
+                placa_atual = dados_orig['placa']
+                tipo_atual = dados_orig['tipo_str']
+
                 if sucesso:
                     logging.info(f"Upload OK: {placa_atual} ({tipo_atual})")
                 else:
                     logging.error(f"Falha Upload {placa_atual}: {erro_msg}")
                     resultados_finais[placa_atual]['falhas'].append(f"Banco {tipo_atual}: {erro_msg}")
-            except Exception as e:
-                logging.error(f"Erro Thread Banco: {e}")
-                resultados_finais[placa_atual]['falhas'].append(f"Crash Thread {tipo_atual}")
 
     lista_sucessos_final = []
     lista_falhas_final = []
