@@ -1,25 +1,25 @@
-import pandas as pd
-import os
-import time
-import json
+import asyncio
 import base64
 import datetime
-import logging
-import telegram
-import asyncio
 import glob
-from typing import cast
+import json
+import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pandas as pd
+import telegram
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import Select
+from selenium.webdriver.support.ui import WebDriverWait
 
 load_dotenv()
 
-# --- Configuração de Diretórios e Constantes ---
 NOME_ARQUIVO_EXCEL = "Base Restituições Vinícius.xlsm"
 NOME_ABA = "Calculos"
 PASTA_DOWNLOADS = os.getenv("PASTA_DOWNLOADS")
@@ -173,7 +173,7 @@ def gerar_pdf_mapa(driver, nome_arquivo_pdf):
         WebDriverWait(driver, 20).until(
             ec.visibility_of_element_located((By.TAG_NAME, SELECTORS["google_maps"]["canvas_map"]))
         )
-        time.sleep(1)
+        time.sleep(1) # Necessário para renderização do Canvas
         result = driver.execute_cdp_cmd("Page.printToPDF", {
             "landscape": False, "printBackground": True, "displayHeaderFooter": True,
             "marginTop": 1, "marginBottom": 1, "marginLeft": 0.5, "marginRight": 0.5
@@ -259,9 +259,8 @@ def preencher_formulario_com_upload(driver, dados_upload):
 
         time.sleep(1)
         driver.find_element(By.XPATH, SELECTORS["form_upload"]["botao_salvar"]).click()
-        time.sleep(4)
+        time.sleep(4) # Necessário para processamento do site do banco
         return True
-
     except Exception as e:
         logging.error(f"Erro Upload ({dados_upload['placa']}): {e}", exc_info=True)
         return False
@@ -273,30 +272,20 @@ def enviar_resumo_telegram(lista_sucesso, lista_falha):
     if not token or not chat_id:
         return
     try:
-        mensagem = ["--- 🤖 Resumo da Automação ---"]
+        mensagem = ["--- 🤖 Resumo da Automação (Híbrida) ---"]
         if lista_sucesso:
-            mensagem.append("\n✅ PLACAS PROCESSADAS COM SUCESSO:")
+            mensagem.append("\n✅ SUCESSOS:")
             total_reembolsado = 0
             for item in lista_sucesso:
                 mensagem.append(f"\nPlaca: {item[COLUNA_PLACA]}")
-                valor_rem_num = 0
-                v_rem_raw = item['valor_rem']
-                if v_rem_raw not in ["N/A", "VALOR_PENDENTE", "VALOR_NAO_ENCONTRADO", 0, "0"]:
-                    try: valor_rem_num = int(v_rem_raw)
-                    except (ValueError, TypeError): valor_rem_num = 0
-
-                valor_rest_num = 0
-                v_rest_raw = item['valor_rest']
-                if v_rest_raw not in ["N/A", "VALOR_PENDENTE", "VALOR_NAO_ENCONTRADO", 0, "0"]:
-                    try: valor_rest_num = int(v_rest_raw)
-                    except (ValueError, TypeError): valor_rest_num = 0
-
-                if valor_rem_num > 0:
-                    mensagem.append(f"  • Remoção: R$ {valor_rem_num},00")
-                    total_reembolsado += valor_rem_num
-                if valor_rest_num > 0:
-                    mensagem.append(f"  • Restituição: R$ {valor_rest_num},00")
-                    total_reembolsado += valor_rest_num
+                for k in ['valor_rem', 'valor_rest']:
+                    try:
+                        val = int(item[k])
+                        if val > 0:
+                            total_reembolsado += val
+                            tipo = "Remoção" if k == 'valor_rem' else "Restituição"
+                            mensagem.append(f"  • {tipo}: R$ {val},00")
+                    except: pass
 
             mensagem.append("\n-----------------------------------")
             mensagem.append(f"💰 Total Reembolsado: R$ {total_reembolsado},00")
@@ -304,185 +293,204 @@ def enviar_resumo_telegram(lista_sucesso, lista_falha):
         if lista_falha:
             mensagem.append("\n\n❌ FALHAS:")
             for item in lista_falha:
-                placa_falha = item.get(COLUNA_PLACA, item.get('placa', 'N/A'))
-                mensagem.append(f"  • Placa: {placa_falha} (Motivo: {item['motivo']})")
-
-        total_s = len(lista_sucesso)
-        total_f = len(lista_falha)
-        if not lista_sucesso and not lista_falha:
-            mensagem.append("\nNenhuma placa nova.")
-        else:
-            mensagem.append("\n-----------------------------------")
-            mensagem.append(f"Resumo: {total_s} sucesso(s) | {total_f} falha(s).")
+                mensagem.append(f"  • {item.get('placa', '?')}: {item.get('motivo', 'Erro')}")
 
         async def enviar_async(tk, cid, texto):
             bot = telegram.Bot(token=tk)
             await bot.send_message(chat_id=cid, text=texto)
         asyncio.run(enviar_async(token, chat_id, "\n".join(mensagem)))
-        logging.info("Resumo Telegram enviado.")
     except Exception as e:
-        logging.error(f"Falha Telegram: {e}", exc_info=True)
+        logging.error(f"Falha Telegram: {e}")
 
-def executar_etapa_isolada(placa, contrato, categoria, url_mapa, tipo_acao, data_hoje):
-    """
-    Executa uma etapa completa (Remoção ou Restituição) abrindo e fechando o driver.
-    """
-    driver = None
+def processar_mapa_single_instance(driver, placa, contrato, categoria, url_mapa, tipo_acao, data_hoje):
+    """Usa o driver compartilhado para processar um mapa (Fase 1)."""
     try:
-        driver = configurar_driver(headless=True)
-        if not driver: raise Exception(f"Driver falhou ao iniciar ({tipo_acao})")
-
         driver.get(url_mapa)
         km_num, km_str = extrair_km_do_mapa(driver)
         valor = get_valor_por_range(categoria, km_num)
 
         suffix = "REMO" if tipo_acao == "Remocao" else "REST"
         nome_arquivo = f"{placa}_{contrato}_{data_hoje}_{km_str}_{valor}_{suffix}.pdf"
+
         caminho_pdf = gerar_pdf_mapa(driver, nome_arquivo)
 
-        if not caminho_pdf: raise Exception(f"Falha PDF ({tipo_acao})")
+        if not caminho_pdf:
+            return False, None, None, "Falha PDF"
 
-        if not fazer_login_banco(driver): raise Exception("Login falhou")
-        if not navegar_menu_gca(driver): raise Exception("Navegação falhou")
+        return True, km_str, valor, caminho_pdf
+    except Exception as e:
+        return False, None, None, str(e)
 
-        dados = {
-            "placa": placa, "contrato": contrato, "data": data_hoje,
-            "valor": str(valor), "tipo_str": tipo_acao, "caminho_pdf": caminho_pdf
-        }
+def executar_apenas_upload_banco(dados_prontos):
+    """Abre driver exclusivo, faz login e upload (Fase 2)."""
+    driver = None
+    try:
+        driver = configurar_driver(headless=True)
+        if not driver: raise Exception("Falha init driver Banco")
+
+        if not fazer_login_banco(driver): raise Exception("Falha Login")
+        if not navegar_menu_gca(driver): raise Exception("Falha Menu GCA")
 
         WebDriverWait(driver, 10).until(ec.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["externo"])))
         WebDriverWait(driver, 10).until(ec.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["interno"])))
 
-        if not preencher_formulario_com_upload(driver, dados): raise Exception(f"Upload falhou ({tipo_acao})")
+        if not preencher_formulario_com_upload(driver, dados_prontos):
+            raise Exception("Falha Preenchimento/Salvar")
 
-        return True, km_str, valor, None, caminho_pdf
-
+        return True, None
     except Exception as e:
-        return False, "0", 0, str(e), None
+        return False, str(e)
     finally:
         if driver: driver.quit()
 
-
 def iniciar_automacao_completa():
     configurar_logger_dinamico()
-    logging.info("--- Iniciando Automação Completa ---")
+    logging.info("--- Iniciando Automação Híbrida (Maps Único + Banco Paralelo) ---")
 
     lista_placas_log = []
-    df_historico_antigo = pd.DataFrame()
+    try:
+        df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+        if not df_hist.empty: lista_placas_log = df_hist[COLUNA_PLACA].astype(str).tolist()
+    except: pass
 
     try:
-        df_historico_antigo = pd.read_excel(NOME_ARQUIVO_HISTORICO)
-        if not df_historico_antigo.empty:
-            lista_placas_log = df_historico_antigo[COLUNA_PLACA].astype(str).tolist()
-    except FileNotFoundError:
-        logging.warning("Histórico não encontrado. Será criado.")
+        df = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA)
+        df[COLUNA_PLACA] = df[COLUNA_PLACA].astype(str)
+        df[COLUNA_CONTRATO] = df[COLUNA_CONTRATO].astype(str)
+        df[COLUNA_CATEGORIA] = df[COLUNA_CATEGORIA].astype(str)
+        df[COLUNA_STATUS_SAFE_DOC] = df[COLUNA_STATUS_SAFE_DOC].astype(str)
     except Exception as e:
-        logging.warning(f"Erro leitura histórico: {e}")
-
-    try:
-        df = cast(pd.DataFrame, cast(object, pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA)))
-    except Exception as e:
-        logging.critical(f"Erro planilha principal: {e}", exc_info=True)
-        enviar_resumo_telegram([], [{'placa': 'N/A', 'motivo': 'Erro leitura Excel'}])
+        logging.critical(f"Erro Excel: {e}")
         return
 
-    df[COLUNA_STATUS_SAFE_DOC] = df[COLUNA_STATUS_SAFE_DOC].astype(str)
-    df[COLUNA_CATEGORIA] = df[COLUNA_CATEGORIA].astype(str)
+    data_hoje = datetime.date.today().strftime("%d-%m-%Y")
+    tarefas_upload = []
+    resultados_finais = {}
 
-    placas_sucesso_info = []
-    placas_falha_info = []
-    data_hoje_formatada = datetime.date.today().strftime("%d-%m-%Y")
+    registros_para_processar = []
+    for idx, row in df.iterrows():
+        placa = str(row[COLUNA_PLACA]).strip()
+        if placa in lista_placas_log: continue
+        registros_para_processar.append(row)
 
-    for index, linha in df.iterrows():
-        try:
-            placa_raw = linha[COLUNA_PLACA]
-            placa = str(placa_raw).strip()
+    if not registros_para_processar:
+        logging.info("Nada a processar.")
+        return
 
-            if placa in lista_placas_log:
-                continue
+    # FASE 1: GOOGLE MAPS (SERIAL)
+    logging.info(f"--- FASE 1: Maps para {len(registros_para_processar)} placas (Instância Única) ---")
+    driver_maps = configurar_driver(headless=True)
 
-            contrato = str(linha[COLUNA_CONTRATO]).strip()
-            categoria = str(linha[COLUNA_CATEGORIA]).strip()
-            end1 = str(linha[COLUNA_END1])
-            end2 = str(linha[COLUNA_END2])
-            end3 = str(linha[COLUNA_END3])
-            status_safe_doc = str(linha[COLUNA_STATUS_SAFE_DOC]).strip()
-            teste_val = linha[COLUNA_TESTE]
+    if driver_maps:
+        for row in registros_para_processar:
+            placa = str(row[COLUNA_PLACA]).strip()
+            contrato = str(row[COLUNA_CONTRATO]).strip()
+            categoria = str(row[COLUNA_CATEGORIA]).strip()
+            status = str(row[COLUNA_STATUS_SAFE_DOC]).strip()
+            teste = row.get(COLUNA_TESTE, 0)
+            end1 = str(row[COLUNA_END1]).replace(" ", "+")
+            end2 = str(row[COLUNA_END2]).replace(" ", "+")
+            end3 = str(row[COLUNA_END3]).replace(" ", "+")
 
-        except KeyError as e:
-            logging.error(f"KeyError Linha {index + 2}: {e}")
-            placas_falha_info.append({'placa': f'Linha {index + 2}', 'motivo': f'Coluna faltante: {e}'})
-            continue
+            url_remocao = f"https://www.google.com/maps/dir/{end1}/{end2}/{end3}/{end1}"
+            url_restituicao = f"https://www.google.com/maps/dir/{end1}/{end3}/{end1}/{end2}"
 
-        end1_url = end1.replace(" ", "+")
-        end2_url = end2.replace(" ", "+")
-        end3_url = end3.replace(" ", "+")
+            run_rem = status == "Pendente remoção" or teste == 1 or (status != "Pendente restituição")
+            run_rest = status == "Pendente restituição" or teste == 1
 
-        logging.info(f"Processando: {placa}")
+            if placa not in resultados_finais:
+                resultados_finais[placa] = {
+                    COLUNA_PLACA: placa, 'valor_rem': 0, 'km_remocao': 0,
+                    'valor_rest': 0, 'km_restituicao': 0, 'falhas': []
+                }
 
-        url_remocao = f"https://www.google.com/maps/dir/{end1_url}/{end2_url}/{end3_url}/{end1_url}"
-        url_restituicao = f"https://www.google.com/maps/dir/{end1_url}/{end3_url}/{end1_url}/{end2_url}"
+            sucesso_rem = True
 
-        run_rem = status_safe_doc == "Pendente remoção" or teste_val == 1 or (status_safe_doc != "Pendente restituição")
-        run_rest = status_safe_doc == "Pendente restituição" or teste_val == 1
+            if run_rem:
+                ok, km, val, pdf = processar_mapa_single_instance(driver_maps, placa, contrato, categoria, url_remocao, "Remocao", data_hoje)
+                if ok:
+                    resultados_finais[placa]['km_remocao'] = km
+                    resultados_finais[placa]['valor_rem'] = val
+                    tarefas_upload.append({
+                        'placa': placa, 'contrato': contrato, 'data': data_hoje,
+                        'valor': str(val), 'tipo_str': "Remocao", 'caminho_pdf': pdf
+                    })
+                else:
+                    sucesso_rem = False
+                    resultados_finais[placa]['falhas'].append(f"Maps Remoção: {pdf}")
 
-        sucesso_final_placa = True
-        km_str_rem_log, valor_rem_log = 0, 0
-        km_str_rest_log, valor_rest_log = 0, 0
+            if run_rest and sucesso_rem:
+                ok, km, val, pdf = processar_mapa_single_instance(driver_maps, placa, contrato, categoria, url_restituicao, "Restituicao", data_hoje)
+                if ok:
+                    resultados_finais[placa]['km_restituicao'] = km
+                    resultados_finais[placa]['valor_rest'] = val
+                    tarefas_upload.append({
+                        'placa': placa, 'contrato': contrato, 'data': data_hoje,
+                        'valor': str(val), 'tipo_str': "Restituicao", 'caminho_pdf': pdf
+                    })
+                else:
+                    resultados_finais[placa]['falhas'].append(f"Maps Restituição: {pdf}")
 
-        if run_rem:
-            logging.info(f"Iniciando Remoção: {placa}")
-            sucesso, km_s, val, erro, _ = executar_etapa_isolada(
-                placa, contrato, categoria, url_remocao, "Remocao", data_hoje_formatada
-            )
-            if sucesso:
-                km_str_rem_log = km_s
-                valor_rem_log = val
-                logging.info(f"Sucesso Remoção: {placa}")
-            else:
-                logging.error(f"Erro Remoção {placa}: {erro}")
-                placas_falha_info.append({'placa': placa, 'motivo': f'Falha Remoção: {erro}'})
-                sucesso_final_placa = False
+        driver_maps.quit()
+        logging.info("--- FASE 1 Concluída ---")
+    else:
+        logging.critical("Não foi possível abrir driver do Maps.")
+        return
 
-        if run_rest and sucesso_final_placa:
-            logging.info(f"Iniciando Restituição: {placa}")
-            sucesso, km_s, val, erro, _ = executar_etapa_isolada(
-                placa, contrato, categoria, url_restituicao, "Restituicao", data_hoje_formatada
-            )
-            if sucesso:
-                km_str_rest_log = km_s
-                valor_rest_log = val
-                logging.info(f"Sucesso Restituição: {placa}")
-            else:
-                logging.error(f"Erro Restituição {placa}: {erro}")
-                placas_falha_info.append({'placa': placa, 'motivo': f'Falha Restituição: {erro}'})
-                sucesso_final_placa = False
+    # FASE 2: BANCO (PARALELO)
+    logging.info(f"--- FASE 2: Uploads no Banco ({len(tarefas_upload)} itens) ---")
+    QTD_WORKERS = 5
 
-        if sucesso_final_placa and (run_rem or run_rest):
-            placas_sucesso_info.append({
-                COLUNA_PLACA: placa, 'km_remocao': km_str_rem_log, 'valor_rem': valor_rem_log,
-                'km_restituicao': km_str_rest_log, 'valor_rest': valor_rest_log
-            })
-            logging.info(f"Placa {placa} OK.")
-        elif not (run_rem or run_rest):
-            logging.info(f"Nenhuma ação para {placa}.")
+    with ThreadPoolExecutor(max_workers=QTD_WORKERS) as executor:
+        futures = {
+            executor.submit(executar_apenas_upload_banco, dados): dados
+            for dados in tarefas_upload
+        }
+
+        for future in as_completed(futures):
+            dados_orig = futures[future]
+            placa_atual = dados_orig['placa']
+            tipo_atual = dados_orig['tipo_str']
+            try:
+                sucesso, erro_msg = future.result()
+                if sucesso:
+                    logging.info(f"Upload OK: {placa_atual} ({tipo_atual})")
+                else:
+                    logging.error(f"Falha Upload {placa_atual}: {erro_msg}")
+                    resultados_finais[placa_atual]['falhas'].append(f"Banco {tipo_atual}: {erro_msg}")
+            except Exception as e:
+                logging.error(f"Erro Thread Banco: {e}")
+                resultados_finais[placa_atual]['falhas'].append(f"Crash Thread {tipo_atual}")
+
+    lista_sucessos_final = []
+    lista_falhas_final = []
+
+    for placa, dados in resultados_finais.items():
+        if dados['falhas']:
+            for f in dados['falhas']:
+                lista_falhas_final.append({'placa': placa, 'motivo': f})
         else:
-            logging.warning(f"Placa {placa} falhou em alguma etapa.")
+            lista_sucessos_final.append(dados)
 
-    logging.info("--- Fim Processamento ---")
-
-    if placas_sucesso_info:
+    if lista_sucessos_final:
         try:
-            df_novas_placas = pd.DataFrame(placas_sucesso_info)
-            df_historico_completo = pd.concat([df_historico_antigo, df_novas_placas], ignore_index=True)
-            df_historico_completo.drop_duplicates(subset=[COLUNA_PLACA], keep='last', inplace=True)
-            df_historico_final = df_historico_completo.reindex(columns=[COLUNA_PLACA, 'km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest'])
-            df_historico_final.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
-            logging.info("Histórico salvo.")
-        except Exception as e:
-            logging.critical(f"Erro salvar histórico: {e}", exc_info=True)
+            df_novas = pd.DataFrame(lista_sucessos_final)
+            try:
+                df_antigo = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+                df_final = pd.concat([df_antigo, df_novas], ignore_index=True)
+            except FileNotFoundError:
+                df_final = df_novas
 
-    enviar_resumo_telegram(placas_sucesso_info, placas_falha_info)
+            df_final.drop_duplicates(subset=[COLUNA_PLACA], keep='last', inplace=True)
+            colunas = [COLUNA_PLACA, 'km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest']
+            df_final = df_final.reindex(columns=colunas)
+            df_final.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
+            logging.info("Histórico Atualizado.")
+        except Exception as e:
+            logging.error(f"Erro ao salvar Excel final: {e}")
+
+    enviar_resumo_telegram(lista_sucessos_final, lista_falhas_final)
+    logging.info("--- FIM DO PROCESSO ---")
 
 if __name__ == "__main__":
     iniciar_automacao_completa()
