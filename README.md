@@ -1,54 +1,93 @@
-Este projeto é um script de automação (RPA) desenvolvido em Python. Sua principal função é ler uma planilha do Excel, calcular rotas no Google Maps para gerar PDFs e, em seguida, fazer o upload desses documentos e preencher um formulário em um portal web.
+# 🤖 Automação LoopBrasil SafeDoc
 
-## Funcionalidades
-* **Leitura de Dados:** Lê informações de uma planilha Excel (`.xlsm`).
-* **Cálculo de Rota:** Abre o Google Maps (via URL) para calcular a quilometragem (KM) de rotas de "Remoção" e "Restituição".
-* **Cálculo de Valor:** Determina o valor do serviço com base na categoria (leve, moto, pesado) e na quilometragem.
-* **Geração de PDF:** Salva um PDF da página do mapa com a rota calculada.
-* **Login Automatizado:** Entra no portal de acesso (`seu.acesso.io`) usando Selenium.
-* **Navegação:** Navega pela estrutura de menus (GCA) até o formulário de upload.
-* **Upload de Documento:** Preenche o formulário com dados (placa, contrato, valor) e anexa o PDF gerado.
-* **Controle de Log:** Mantém um log em Excel (`log_processados.xlsx`) para evitar processar a mesma placa duas vezes.
+> **RPA para Cálculo de Rotas, Geração de PDFs e Upload em Portal Bancário.**
 
-## Libs Utilizadas
-* **Python 3**
-* **Selenium:** Para automação e controle do navegador (Google Chrome).
-* **Pandas:** Para leitura e manipulação da planilha Excel `.xlsm`.
-* **Python-dotenv:** Para gerenciamento seguro de credenciais e caminhos.
-* **Openpyxl:** (Dependência do Pandas) para manipulação de arquivos `.xlsx`.
+Este projeto é uma solução robusta de automação desenvolvida em Python para otimizar o processo de restituição e remoção de veículos. Ele integra leitura de planilhas, cálculo de rotas via Google Maps, geração de evidências em PDF e inserção automática de dados em portal corporativo.
 
-## Configuração do Ambiente
-1.  **Clone o repositório:**
-    ```bash
-    git clone [https://github.com/seu-usuario/seu-repositorio.git](https://github.com/seu-usuario/seu-repositorio.git)
-    cd seu-repositorio
-    ```
-2.  **Crie um ambiente virtual (Recomendado):**
-    ```bash
-    python -m venv venv
-    .\venv\Scripts\activate   
-    ```
-3.  **Instale as bibliotecas necessárias:**
-    ```bash
-    pip install selenium pandas python-dotenv openpyxl
-    ```
-    
-## Arquivo de Configuração
-Para que o script funcione, você **deve** criar um arquivo chamado `.env` na raiz do projeto. Este arquivo **não** é enviado ao GitHub e contém todos os seus dados sensíveis.
+---
 
-Copie o conteúdo abaixo e cole no seu arquivo `.env`, substituindo com seus dados:
+## 🚀 Funcionalidades Principais
+
+*   **🔄 Sincronização Inteligente de Dados**
+    *   Fluxo de dados: `Planilha Local` -> `Base de Rede` -> `Histórico Geral`.
+    *   Garante integridade dos dados e evita reprocessamento desnecessário.
+    *   Interação com usuário para resolução de conflitos de dados.
+
+*   **🗺️ Google Maps & Cálculo de Custos**
+    *   Extração automática de quilometragem (KM) via Selenium.
+    *   Cálculo de valores baseado em **Ranges de KM** e **Tabelas de Custo JPR**.
+    *   Geração automática de PDFs das rotas como evidência.
+
+*   **🏦 Automação Bancária (Portal)**
+    *   Login automático e navegação em menus complexos (GCA).
+    *   Preenchimento de formulários e upload de arquivos PDF.
+
+*   **📢 Notificações & Logs**
+    *   **Telegram:** Envio de resumo da execução (Sucessos, Falhas e Valores Totais).
+    *   **Logs Diários:** Organização automática de logs em pastas por data (`logs/YYYY-MM-DD/`).
+
+---
+
+## 🛠️ Pré-requisitos
+
+*   **Python 3.8+**
+*   **Google Chrome** instalado.
+
+### Instalação das Dependências
+
+Execute o comando abaixo para instalar as bibliotecas necessárias:
+
+```bash
+pip install pandas selenium python-dotenv openpyxl python-telegram-bot
+```
+
+---
+
+## ⚙️ Configuração (.env)
+
+Crie um arquivo `.env` na raiz do projeto para armazenar suas credenciais e caminhos. **Este arquivo não deve ser versionado.**
 
 ```ini
-# Configuração de credenciais e caminhos
-PASTA_DOWNLOADS="C:\Caminho\Para\Sua\Pasta\Downloads"
-URL_BANCO="link_safe_doc"
-USUARIO_BANCO="seu_usuario_de_login"
-SENHA_BANCO="sua_senha_secreta_123"
+# --- Caminhos e Arquivos ---
+PASTA_DOWNLOADS="C:\Caminho\Para\Downloads"
+CAMINHO_BASE_EXTERNA="Z:\Rede\remocao-restituicao.xlsx"
+CAMINHO_CUSTO_RESTITUICAO="C:\Dados\Custo_Restituicao.xlsx"
+
+# --- Acesso ao Portal Bancário ---
+URL_BANCO="https://seu.portal.banco.com.br"
+USUARIO_BANCO="seu_usuario"
+SENHA_BANCO="sua_senha"
+
+# --- Notificações Telegram (Opcional) ---
+TELEGRAM_BOT_TOKEN="seu_token_do_bot"
+TELEGRAM_CHAT_ID="seu_chat_id"
 ```
 
-## Como Executar
-Após instalar as dependências e configurar o `.env`, basta executar o script principal:
+---
+
+## 📂 Estrutura de Arquivos Importantes
+
+*   `automacao.py`: Script principal.
+*   `Base_Restituicoes.xlsx`: Planilha de entrada (Local).
+*   `historico_processamento.xlsx`: Base de dados histórica (Gerada/Atualizada automaticamente).
+*   `logs/`: Diretório onde os logs de execução são salvos diariamente.
+
+---
+
+## ▶️ Como Executar
+
+1.  Certifique-se de que o arquivo `.env` está configurado corretamente.
+2.  Feche qualquer arquivo Excel que possa estar sendo usado pelo script.
+3.  Execute o script:
+
 ```bash
-python seu_script.py
+python automacao.py
 ```
-*(Substitua `seu_script.py` pelo nome real do seu arquivo .py)*
+
+O robô iniciará o processo, exibindo o progresso no terminal e salvando logs detalhados.
+
+---
+
+## 📝 Licença
+
+Este projeto está licenciado sob a licença **MIT**. Consulte o arquivo LICENSE para mais detalhes.
