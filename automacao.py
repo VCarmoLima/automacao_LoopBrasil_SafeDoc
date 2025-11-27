@@ -130,6 +130,28 @@ def limpar_texto_estilo_excel(texto):
     texto_sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
     return " ".join(re.sub(r'[^A-Z0-9\s]', '', texto_sem_acento.upper()).split())
 
+def formatar_data_ptbr(valor):
+    """Converte datas para o formato string dd/mm/yyyy."""
+    if pd.isna(valor) or str(valor).strip() in ['', 'nan', 'None', 'NaT']: return ""
+    
+    # Se já for objeto datetime, formata
+    if hasattr(valor, 'strftime'): 
+        return valor.strftime('%d/%m/%Y')
+    
+    # Tenta converter string
+    try:
+        # Se for string ISO (YYYY-MM-DD), o pandas entende melhor sem dayfirst=True
+        if isinstance(valor, str) and '-' in valor:
+            dt = pd.to_datetime(valor, errors='coerce')
+        else:
+            dt = pd.to_datetime(valor, errors='coerce', dayfirst=True)
+            
+        if pd.notna(dt): 
+            return dt.strftime('%d/%m/%Y')
+    except: pass
+    
+    return str(valor)
+
 def carregar_bases_de_enderecos():
     try:
         df_bases = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA_BASES, header=None)
@@ -264,6 +286,7 @@ def calcular_valor_restituicao_final(transp_nome, cidade_nome, patio_nome, categ
     return valores.get('Caminhonete', 0)
 
 def configurar_driver(headless=True):
+    # --- GARANTIA DE INVISIBILIDADE (HEADLESS) ---
     chrome_options = Options()
     if headless: 
         chrome_options.add_argument("--headless")
@@ -324,6 +347,18 @@ def gerar_pdf_mapa(driver, nome_arquivo_pdf):
         return caminho_completo
     except: return None
 
+def processar_mapa_single_instance(driver, placa, contrato, categoria, url, tipo, data):
+    try:
+        driver.get(url)
+        km, km_str = extrair_km_do_mapa(driver)
+        val = get_valor_por_range(categoria, km)
+        if val == "VALOR_NAO_ENCONTRADO": return False, None, None, f"KM {km} fora range"
+        nome = f"{placa}_{contrato}_{data}_{km_str}_{val}_{'REMO' if tipo == 'Remocao' else 'REST'}.pdf"
+        pdf = gerar_pdf_mapa(driver, nome)
+        if not pdf: return False, None, None, "Falha PDF"
+        return True, km_str, val, pdf
+    except Exception as e: return False, None, None, str(e)
+
 def fazer_login_banco(driver):
     try:
         logging.info("Tentando abrir site do banco...")
@@ -333,8 +368,15 @@ def fazer_login_banco(driver):
         driver.find_element(By.XPATH, SELECTORS["login"]["usuario"]).send_keys(USUARIO_BANCO)
         driver.find_element(By.XPATH, SELECTORS["login"]["senha"]).send_keys(SENHA_BANCO)
         driver.find_element(By.XPATH, SELECTORS["login"]["botao"]).click()
+        
         logging.info("Aguardando menu principal...")
+        # Lógica antiga: esperava Link 1 aparecer
         WebDriverWait(driver, 30).until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
+        
+        # FIX PARA MODO INVISÍVEL: 
+        # Em headless, o site pode demorar um pouco mais para renderizar o JS do menu após o login.
+        time.sleep(5) 
+        
         return True
     except Exception as e:
         logging.error(f"Erro detalhado login: {e}")
@@ -342,11 +384,22 @@ def fazer_login_banco(driver):
 
 def navegar_menu_gca(driver):
     try:
-        WebDriverWait(driver, 20).until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"]))).click()
-        WebDriverWait(driver, 20).until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_2"]))).click()
-        WebDriverWait(driver, 20).until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_3"]))).click()
+        logging.info("Navegando no Menu GCA (Sequencial)...")
+        wait = WebDriverWait(driver, 30)
+        
+        # Mesma lógica do arquivo antigo: Link 1 -> Link 2 -> Link 3
+        el1 = wait.until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
+        el1.click()
+        
+        el2 = wait.until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_2"])))
+        el2.click()
+        
+        el3 = wait.until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_3"])))
+        el3.click()
         return True
-    except: return False
+    except Exception as e:
+        logging.error(f"Erro ao navegar no menu: {e}")
+        return False
 
 def preencher_formulario_com_upload(driver, dados_upload, texto_ant=None):
     try:
@@ -381,10 +434,11 @@ def preencher_formulario_com_upload(driver, dados_upload, texto_ant=None):
                 txt = d.find_element(By.XPATH, SELECTORS["form_upload"]["mensagem_sucesso"]).text.strip()
                 return txt if txt and txt != texto_ant else False
             except: return False
-        
+            
         res = WebDriverWait(driver, 20).until(check_msg)
         return True, res
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        return False, str(e)
 
 def enviar_resumo_telegram(sucesso, falha):
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
@@ -416,17 +470,64 @@ def enviar_resumo_telegram(sucesso, falha):
         asyncio.run(send(token, chat, "\n".join(msg)))
     except: pass
 
-def processar_mapa_single_instance(driver, placa, contrato, categoria, url, tipo, data):
+def aplicar_calculos_analise(df):
+    """
+    Aplica cálculos de análise na planilha de histórico.
+    Adiciona/Atualiza as colunas: Teste, Transportadora_real, Calculo_cobrança.
+    PROTEÇÃO: Não sobrescreve 'Calculo_cobrança' se já houver valor.
+    """
     try:
-        driver.get(url)
-        km, km_str = extrair_km_do_mapa(driver)
-        val = get_valor_por_range(categoria, km)
-        if val == "VALOR_NAO_ENCONTRADO": return False, None, None, f"KM {km} fora range"
-        nome = f"{placa}_{contrato}_{data}_{km_str}_{val}_{'REMO' if tipo == 'Remocao' else 'REST'}.pdf"
-        pdf = gerar_pdf_mapa(driver, nome)
-        if not pdf: return False, None, None, "Falha PDF"
-        return True, km_str, val, pdf
-    except Exception as e: return False, None, None, str(e)
+        logging.info("Aplicando cálculos de análise...")
+        
+        cols_num = ['Valor_Base_Guincho', 'valor_rem', 'Valor_Base_Guincho2']
+        for col in cols_num:
+            if col not in df.columns:
+                df[col] = 0.0
+            else:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+
+        if 'Tipo_Restituicao' in df.columns:
+            df['Teste'] = df['Tipo_Restituicao'].astype(str).str.strip().apply(
+                lambda x: 1 if x == "Transportadora" else 0
+            )
+        else:
+            df['Teste'] = 0
+
+        if 'Transportadora' in df.columns:
+            df['Transportadora_real'] = df.apply(
+                lambda row: row['Transportadora'] if row['Teste'] == 1 else "", axis=1
+            )
+        else:
+            df['Transportadora_real'] = ""
+
+        def calc_cobranca(row):
+            valor_atual = row.get('Calculo_cobrança')
+            if pd.notna(valor_atual):
+                try:
+                    if float(valor_atual) > 0: return valor_atual
+                except:
+                    if str(valor_atual).strip() != "": return valor_atual
+
+            tipo_lib = str(row.get('Tipo_Liberacao', '')).strip()
+            teste = row['Teste']
+            v_base = row['Valor_Base_Guincho']
+            v_rem = row['valor_rem']
+            v_base2 = row['Valor_Base_Guincho2']
+
+            if tipo_lib == "Determinação Judicial" and teste == 1:
+                return 0.0
+            elif tipo_lib == "Acordo" and teste == 1:
+                return ((v_base - v_rem) + v_base2) * 1.15
+            elif tipo_lib == "Acordo" and teste == 0:
+                return (v_base - v_rem) * 1.15
+            else:
+                return 0.0 
+
+        df['Calculo_cobrança'] = df.apply(calc_cobranca, axis=1)
+        return df
+    except Exception as e:
+        logging.error(f"Erro ao aplicar cálculos de análise: {e}")
+        return df
 
 def salvar_historico_parcial(res_final):
     try:
@@ -438,8 +539,14 @@ def salvar_historico_parcial(res_final):
         except:
             logging.warning("Histórico não encontrado no salvamento parcial. Criando novo.")
             df_hist = pd.DataFrame(res_final.values())
+            df_hist = aplicar_calculos_analise(df_hist)
             df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
             return
+
+        cols_to_fix = ['km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest', 'Valor_Base_Guincho2']
+        for col in cols_to_fix:
+            if col in df_hist.columns:
+                df_hist[col] = df_hist[col].astype('object')
 
         updates_count = 0
         for placa, dados in res_final.items():
@@ -452,8 +559,15 @@ def salvar_historico_parcial(res_final):
                 updates_count += 1
         
         df_hist.reset_index(inplace=True)
+        df_hist = aplicar_calculos_analise(df_hist)
+        
+        cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
+        for col in cols_data:
+            if col in df_hist.columns:
+                df_hist[col] = df_hist[col].apply(formatar_data_ptbr)
+
         df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
-        logging.info(f"CHECKPOINT: KMs atualizados em {updates_count} placas (Dados antigos preservados).")
+        logging.info(f"CHECKPOINT: KMs atualizados em {updates_count} placas.")
         
     except Exception as e:
         logging.error(f"Erro ao salvar checkpoint: {e}")
@@ -468,11 +582,20 @@ def iniciar_automacao_completa():
     tabela_jpr = carregar_tabela_custos_jpr()
 
     if os.path.exists(NOME_ARQUIVO_HISTORICO):
-        try: df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
-        except: df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
-    else: df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
+        try:
+            df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+        except:
+            df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
+    else:
+        df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
     
     df_hist = sincronizar_dados_dinamicos_local(df_hist, df_ext)
+    df_hist = aplicar_calculos_analise(df_hist)
+    cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
+    for col in cols_data:
+        if col in df_hist.columns:
+            df_hist[col] = df_hist[col].apply(formatar_data_ptbr)
+            
     df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
     logging.info("Histórico Sincronizado e Salvo.")
 
@@ -514,6 +637,7 @@ def iniciar_automacao_completa():
     res_final = {}
     uploads = []
     
+    # Maps continua Headless (Invisível)
     driver = configurar_driver(headless=True)
     if driver:
         dt = datetime.date.today().strftime("%d-%m-%Y")
@@ -565,6 +689,7 @@ def iniciar_automacao_completa():
 
     logging.info(f"Fase Banco: {len(uploads)} uploads (Modo Sequencial).")
     if uploads:
+        # ATENÇÃO: Mantendo HEADLESS=TRUE conforme pedido, mas com o delay de segurança
         driver_banco = configurar_driver(headless=True)
         if driver_banco and fazer_login_banco(driver_banco):
             try:
@@ -591,6 +716,10 @@ def iniciar_automacao_completa():
         else:
             logging.critical("Falha ao abrir banco ou fazer login.")
             for d in uploads: res_final[d['placa']]['falhas'].append("Erro Geral Login Banco")
+
+    if res_final:
+        try: df_atual = pd.DataFrame(list(res_final.values()))
+        except: pass
 
     salvar_historico_parcial(res_final)
 
