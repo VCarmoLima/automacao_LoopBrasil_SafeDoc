@@ -12,6 +12,7 @@ import math
 import unicodedata
 import re
 import shutil
+import win32com.client as win32
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -131,16 +132,12 @@ def limpar_texto_estilo_excel(texto):
     return " ".join(re.sub(r'[^A-Z0-9\s]', '', texto_sem_acento.upper()).split())
 
 def formatar_data_ptbr(valor):
-    """Converte datas para o formato string dd/mm/yyyy."""
     if pd.isna(valor) or str(valor).strip() in ['', 'nan', 'None', 'NaT']: return ""
     
-    # Se já for objeto datetime, formata
     if hasattr(valor, 'strftime'): 
         return valor.strftime('%d/%m/%Y')
     
-    # Tenta converter string
     try:
-        # Se for string ISO (YYYY-MM-DD), o pandas entende melhor sem dayfirst=True
         if isinstance(valor, str) and '-' in valor:
             dt = pd.to_datetime(valor, errors='coerce')
         else:
@@ -286,7 +283,6 @@ def calcular_valor_restituicao_final(transp_nome, cidade_nome, patio_nome, categ
     return valores.get('Caminhonete', 0)
 
 def configurar_driver(headless=True):
-    # --- GARANTIA DE INVISIBILIDADE (HEADLESS) ---
     chrome_options = Options()
     if headless: 
         chrome_options.add_argument("--headless")
@@ -370,11 +366,8 @@ def fazer_login_banco(driver):
         driver.find_element(By.XPATH, SELECTORS["login"]["botao"]).click()
         
         logging.info("Aguardando menu principal...")
-        # Lógica antiga: esperava Link 1 aparecer
         WebDriverWait(driver, 30).until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
         
-        # FIX PARA MODO INVISÍVEL: 
-        # Em headless, o site pode demorar um pouco mais para renderizar o JS do menu após o login.
         time.sleep(5) 
         
         return True
@@ -387,7 +380,6 @@ def navegar_menu_gca(driver):
         logging.info("Navegando no Menu GCA (Sequencial)...")
         wait = WebDriverWait(driver, 30)
         
-        # Mesma lógica do arquivo antigo: Link 1 -> Link 2 -> Link 3
         el1 = wait.until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
         el1.click()
         
@@ -470,12 +462,147 @@ def enviar_resumo_telegram(sucesso, falha):
         asyncio.run(send(token, chat, "\n".join(msg)))
     except: pass
 
+def enviar_email_outlook(lista_uploads_sucesso):
+    if not lista_uploads_sucesso:
+        logging.info("Nenhum upload realizado, e-mail não será enviado.")
+        return
+
+    destinatario = os.getenv("EMAIL_FINANCEIRO")
+    
+    if not destinatario:
+        logging.warning("ABORTADO: Variável 'EMAIL_FINANCEIRO' não encontrada no .env.")
+        return
+
+    try:
+        try: diretorio_script = os.path.dirname(os.path.abspath(__file__))
+        except: diretorio_script = os.getcwd()
+        
+        hoje_str_log = datetime.date.today().strftime("%Y-%m-%d")
+        pasta_logs_hoje = os.path.join(diretorio_script, "logs", hoje_str_log)
+        
+        qtd_logs = len(glob.glob(os.path.join(pasta_logs_hoje, "log_*.txt")))
+        versao = qtd_logs if qtd_logs > 0 else 1
+    except:
+        versao = 1
+
+    data_hoje_formatada = datetime.date.today().strftime('%d/%m/%Y')
+    assunto = f"Relatório de Reembolsos - Processamento v{versao} {data_hoje_formatada}"
+    
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #eeeeee; margin: 0; padding: 20px; }}
+        .container {{ max-width: 700px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border-top: 5px solid #CC0000; }}
+        .header {{ background-color: #ffffff; color: #333; padding: 20px; text-align: center; border-bottom: 1px solid #eee; }}
+        .header h2 {{ margin: 0; font-size: 22px; font-weight: 700; color: #CC0000; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .content {{ padding: 30px; color: #444; line-height: 1.6; }}
+        .table-container {{ margin-top: 25px; margin-bottom: 25px; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+        th {{ background-color: #f2f2f2; color: #222; font-weight: bold; text-align: left; padding: 12px; border-bottom: 2px solid #ccc; }}
+        td {{ padding: 12px; border-bottom: 1px solid #f0f0f0; color: #555; vertical-align: middle; }}
+        
+        /* Tags de Status */
+        .tag-remo {{ background-color: #e0e0e0; color: #333; padding: 5px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase; }}
+        .tag-rest {{ background-color: #ffebee; color: #c62828; padding: 5px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase; border: 1px solid #ffcdd2; }}
+        
+        .total-row {{ background-color: #222222; color: #ffffff; font-weight: bold; }}
+        .footer {{ background-color: #f9f9f9; padding: 20px; text-align: center; font-size: 11px; color: #999; border-top: 1px solid #eee; }}
+        .signature {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; }}
+        .dev-name {{ font-weight: bold; color: #CC0000; font-size: 16px; }}
+        .dev-role {{ color: #666; font-size: 14px; margin-top: 2px; display: block; }}
+        .bot-badge {{ display: inline-block; background-color: #000; color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 10px; margin-right: 5px; }}
+    </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>Relatório de Reembolsos</h2>
+            </div>
+            
+            <div class="content">
+                <p>Olá, <strong>Equipe Financeira</strong>.</p>
+                <p>O <strong>Bot Restituição</strong> finalizou a rodada de processamento <strong>v{versao}</strong> referente a data de hoje ({data_hoje_formatada}).</p>
+                <p>Abaixo estão consolidados os valores lançados com sucesso no sistema SafeDOC:</p>
+
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Placa</th>
+                                <th>Contrato</th>
+                                <th>Data Fato</th>
+                                <th>Tipo</th>
+                                <th>Valor (R$)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+    """
+    
+    total_valor = 0
+    for item in lista_uploads_sucesso:
+        try:
+            val_float = float(item['valor'])
+            val_fmt = f"{val_float:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            total_valor += val_float
+        except:
+            val_fmt = item['valor']
+        
+        tipo_clean = "Restituição" if "Restituicao" in item['tipo_str'] else "Remoção"
+        classe_tag = "tag-rest" if "Restituicao" in item['tipo_str'] else "tag-remo"
+            
+        html_body += f"""
+            <tr>
+                <td style="font-family: monospace; font-size: 13px; font-weight: 600;">{item['placa']}</td>
+                <td>{item['contrato']}</td>
+                <td>{item['data']}</td>
+                <td><span class="{classe_tag}">{tipo_clean}</span></td>
+                <td>R$ {val_fmt}</td>
+            </tr>
+        """
+
+    total_fmt = f"{total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    html_body += f"""
+                        <tr class="total-row">
+                            <td colspan="4" style="text-align: right; padding-right: 20px;">TOTAL LANÇADO:</td>
+                            <td>R$ {total_fmt}</td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="signature">
+                    <p>Atenciosamente,</p>
+                    <span class="dev-name">Vinícius Lima</span>
+                    <span class="dev-role">Automação & Otimização de Processos</span>
+                    <br>
+                    <span style="font-size: 12px; color: #888;">Loop Transportes</span>
+                </div>
+            </div>
+
+            <div class="footer">
+                <span class="bot-badge">BOT</span> Relatório gerado automaticamente pelo <strong>Bot Restituição, Loop Transportes</strong><br>
+                Processamento realizado em {datetime.datetime.now().strftime('%d/%m/%Y às %H:%M')}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    try:
+        outlook = win32.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = destinatario
+        mail.Subject = assunto
+        mail.HTMLBody = html_body
+        mail.Send()
+        logging.info(f"E-mail enviado para {destinatario} | Assunto: {assunto}")
+    except Exception as e:
+        logging.error(f"Erro ao enviar e-mail via Outlook: {e}")
+
 def aplicar_calculos_analise(df):
-    """
-    Aplica cálculos de análise na planilha de histórico.
-    Adiciona/Atualiza as colunas: Teste, Transportadora_real, Calculo_cobrança.
-    PROTEÇÃO: Não sobrescreve 'Calculo_cobrança' se já houver valor.
-    """
     try:
         logging.info("Aplicando cálculos de análise...")
         
@@ -591,6 +718,7 @@ def iniciar_automacao_completa():
     
     df_hist = sincronizar_dados_dinamicos_local(df_hist, df_ext)
     df_hist = aplicar_calculos_analise(df_hist)
+    
     cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
     for col in cols_data:
         if col in df_hist.columns:
@@ -602,7 +730,19 @@ def iniciar_automacao_completa():
     try:
         df = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA_CALCULOS)
         if COLUNA_PLACA in df.columns: df[COLUNA_PLACA] = df[COLUNA_PLACA].astype(str).str.strip()
-        df[COLUNA_TESTE] = pd.to_numeric(df[COLUNA_TESTE], errors='coerce').fillna(0).astype(int)
+        
+        if not df_hist.empty and COLUNA_TESTE in df_hist.columns:
+            df_teste_ref = df_hist[[COLUNA_PLACA, COLUNA_TESTE]].copy()
+            df_teste_ref[COLUNA_PLACA] = df_teste_ref[COLUNA_PLACA].astype(str).str.strip()
+            df_teste_ref.drop_duplicates(subset=[COLUNA_PLACA], inplace=True)
+            
+            if COLUNA_TESTE in df.columns:
+                df.drop(columns=[COLUNA_TESTE], inplace=True)
+
+            df = pd.merge(df, df_teste_ref, on=COLUNA_PLACA, how='left')
+            df[COLUNA_TESTE] = pd.to_numeric(df[COLUNA_TESTE], errors='coerce').fillna(0).astype(int)
+        else:
+            df[COLUNA_TESTE] = 0
 
         if not df_ext.empty:
             df = pd.merge(df, df_ext, left_on=COLUNA_PLACA, right_on='placa_key', how='left')
@@ -637,7 +777,6 @@ def iniciar_automacao_completa():
     res_final = {}
     uploads = []
     
-    # Maps continua Headless (Invisível)
     driver = configurar_driver(headless=True)
     if driver:
         dt = datetime.date.today().strftime("%d-%m-%Y")
@@ -647,6 +786,7 @@ def iniciar_automacao_completa():
             categoria_safe = row.get('Categoria_Ext') or row.get('Categoria') or "Leve"
             transp_atual = str(row.get('transp_raw', '')).strip()
             end1, end2, end3 = row[COLUNA_END1], row[COLUNA_END2], row[COLUNA_END3]
+            flag_teste = row.get(COLUNA_TESTE, 0)
 
             if placa not in res_final:
                 res_final[placa] = {
@@ -673,7 +813,183 @@ def iniciar_automacao_completa():
                 logging.error(f"Falha Maps Remo ({placa}): {pdf}")
                 res_final[placa]['falhas'].append(f"Maps Remo: {pdf}")
 
-            if row[COLUNA_TESTE] == 1 and ok:
+            if flag_teste == 1 and ok:
+                if not end3: res_final[placa]['falhas'].append("Sem Cidade Destino")
+                else:
+                    ok2, km2, val2, pdf2 = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rest, "Restituicao", dt)
+                    if ok2:
+                        res_final[placa]['valor_rest'] = val2
+                        res_final[placa]['km_restituicao'] = km2
+                        uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt, 'valor': str(val2), 'tipo_str': "Restituicao", 'caminho_pdf': pdf2})
+                    else:
+                        res_final[placa]['falhas'].append(f"Maps Rest: {pdf2}")
+        driver.quit()
+
+    salvar_historico_parcial(res_final)
+
+    logging.info(f"Fase Banco: {len(uploads)} uploads (Modo Sequencial).")
+    
+    uploads_confirmados = [] 
+
+    if uploads:
+        driver_banco = configurar_driver(headless=True)
+        if driver_banco and fazer_login_banco(driver_banco):
+            try:
+                if navegar_menu_gca(driver_banco):
+                    WebDriverWait(driver_banco, 10).until(ec.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["externo"])))
+                    WebDriverWait(driver_banco, 10).until(ec.frame_to_be_available_and_switch_to_it((By.ID, SELECTORS["iframes"]["interno"])))
+                    
+                    last_txt = None
+                    for d in uploads:
+                        p = d['placa']
+                        logging.info(f"Iniciando Upload: {p} ({d['tipo_str']})")
+                        ok, txt = preencher_formulario_com_upload(driver_banco, d, last_txt)
+                        if ok:
+                            logging.info(f"Upload OK: {p}")
+                            uploads_confirmados.append(d) 
+                            last_txt = txt
+                        else:
+                            logging.error(f"Falha Upload {p}: {txt}")
+                            res_final[p]['falhas'].append(f"Banco {d['tipo_str']}: {txt}")
+                else:
+                    logging.error("Falha ao navegar no Menu GCA.")
+                    for d in uploads: res_final[d['placa']]['falhas'].append("Erro Menu Banco")
+            finally:
+                driver_banco.quit()
+        else:
+            logging.critical("Falha ao abrir banco ou fazer login.")
+            for d in uploads: res_final[d['placa']]['falhas'].append("Erro Geral Login Banco")
+
+    if res_final:
+        try: df_atual = pd.DataFrame(list(res_final.values()))
+        except: pass
+
+    salvar_historico_parcial(res_final)
+
+    sucessos = [d for d in res_final.values() if not d['falhas']]
+    falhas = [{'placa': k, 'motivo': v['falhas']} for k, v in res_final.items() if v['falhas']]
+    enviar_resumo_telegram(sucessos, falhas)
+    
+    enviar_email_outlook(uploads_confirmados)
+
+    logging.info("FIM DO PROCESSO UNIFICADO.")
+    configurar_logger_dinamico()
+    logging.info("--- Automação Unificada (Fix Rede + Sync Histórico + Maps/Banco SEQUENCIAL) ---")
+
+    dict_transp, dict_patio = carregar_bases_de_enderecos()
+    df_ext = carregar_base_externa_rede()
+    tabela_jpr = carregar_tabela_custos_jpr()
+
+    if os.path.exists(NOME_ARQUIVO_HISTORICO):
+        try:
+            df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+        except:
+            df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
+    else:
+        df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
+    
+    df_hist = sincronizar_dados_dinamicos_local(df_hist, df_ext)
+    df_hist = aplicar_calculos_analise(df_hist)
+    
+    cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
+    for col in cols_data:
+        if col in df_hist.columns:
+            df_hist[col] = df_hist[col].apply(formatar_data_ptbr)
+            
+    df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
+    logging.info("Histórico Sincronizado e Salvo.")
+
+    try:
+        df = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA_CALCULOS)
+        if COLUNA_PLACA in df.columns: df[COLUNA_PLACA] = df[COLUNA_PLACA].astype(str).str.strip()
+        
+        
+        if not df_hist.empty and COLUNA_TESTE in df_hist.columns:
+            df_teste_ref = df_hist[[COLUNA_PLACA, COLUNA_TESTE]].copy()
+            df_teste_ref[COLUNA_PLACA] = df_teste_ref[COLUNA_PLACA].astype(str).str.strip()
+            df_teste_ref.drop_duplicates(subset=[COLUNA_PLACA], inplace=True)
+            
+            if COLUNA_TESTE in df.columns:
+                df.drop(columns=[COLUNA_TESTE], inplace=True)
+
+            df = pd.merge(df, df_teste_ref, on=COLUNA_PLACA, how='left')
+            
+            df[COLUNA_TESTE] = pd.to_numeric(df[COLUNA_TESTE], errors='coerce').fillna(0).astype(int)
+        else:
+            logging.warning("Histórico vazio ou sem coluna Teste. Assumindo Teste=0 para todos.")
+            df[COLUNA_TESTE] = 0
+
+        if not df_ext.empty:
+            df = pd.merge(df, df_ext, left_on=COLUNA_PLACA, right_on='placa_key', how='left')
+
+        for i, row in df.iterrows():
+            tn = str(row.get('transp_raw', '')).strip().upper()
+            df.at[i, COLUNA_END1] = dict_transp.get(tn, "")
+            pn = limpar_texto_estilo_excel(str(row.get('patio_raw', '')))
+            df.at[i, COLUNA_END2] = dict_patio.get(pn, "")
+            cn = str(row.get('cidade_raw', ''))
+            df.at[i, COLUNA_END3] = limpar_texto_estilo_excel(cn) if cn != 'nan' else ""
+    except Exception as e:
+        logging.critical(f"Erro ao preparar dados: {e}")
+        return
+
+    try:
+        hist_check = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+        for c in ['valor_rem', 'km_remocao']:
+            if c in hist_check.columns: hist_check[c] = pd.to_numeric(hist_check[c], errors='coerce').fillna(0)
+            else: hist_check[c] = 0
+        concluidas = hist_check[ (hist_check['valor_rem'] > 0) | (hist_check['km_remocao'] > 0) ][COLUNA_PLACA].astype(str).str.strip().tolist()
+    except: concluidas = []
+
+    fila = [row for _, row in df.iterrows() if str(row[COLUNA_PLACA]).strip() not in concluidas]
+    
+    if not fila:
+        logging.info("Nada a processar (Todas as placas concluídas).")
+        return
+
+    logging.info(f"Fase Maps: {len(fila)} placas para processar.")
+    
+    res_final = {}
+    uploads = []
+    
+    driver = configurar_driver(headless=True)
+    if driver:
+        dt = datetime.date.today().strftime("%d-%m-%Y")
+        for row in fila:
+            placa = row[COLUNA_PLACA]
+            contrato_safe = row.get('contrato_externo') or row.get('Contrato') or "S_CONTRATO"
+            categoria_safe = row.get('Categoria_Ext') or row.get('Categoria') or "Leve"
+            transp_atual = str(row.get('transp_raw', '')).strip()
+            end1, end2, end3 = row[COLUNA_END1], row[COLUNA_END2], row[COLUNA_END3]
+            
+            flag_teste = row.get(COLUNA_TESTE, 0)
+
+            if placa not in res_final:
+                res_final[placa] = {
+                    COLUNA_PLACA: placa, 'valor_rem': 0, 'km_remocao': 0, 'valor_rest': 0, 'km_restituicao': 0, 'falhas': [],
+                    'Contrato_Externo': contrato_safe, 'Valor_Base_Guincho': row.get('valor_base_db', ''),
+                    'Transportadora': transp_atual, 'Valor_Base_Guincho2': 0
+                }
+
+            if not end1 or len(str(end1)) < 3:
+                res_final[placa]['falhas'].append("Endereço Transp Inválido")
+                continue
+
+            url_rem = f"https://www.google.com/maps/dir/{end1.replace(' ','+')}/{end2.replace(' ','+')}/{end3.replace(' ','+')}/{end1.replace(' ','+')}"
+            url_rest = f"https://www.google.com/maps/dir/{end1.replace(' ','+')}/{end3.replace(' ','+')}/{end1.replace(' ','+')}/{end2.replace(' ','+')}"
+
+            ok, km, val, pdf = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rem, "Remocao", dt)
+            if ok:
+                res_final[placa]['valor_rem'] = val
+                res_final[placa]['km_remocao'] = km
+                uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt, 'valor': str(val), 'tipo_str': "Remocao", 'caminho_pdf': pdf})
+                val_orig = row.get('valor_base_db', 0)
+                res_final[placa]['Valor_Base_Guincho2'] = calcular_valor_restituicao_final(transp_atual, row.get('cidade_raw', ''), row.get('patio_raw', ''), categoria_safe, val_orig, tabela_jpr)
+            else:
+                logging.error(f"Falha Maps Remo ({placa}): {pdf}")
+                res_final[placa]['falhas'].append(f"Maps Remo: {pdf}")
+
+            if flag_teste == 1 and ok:
                 if not end3: res_final[placa]['falhas'].append("Sem Cidade Destino")
                 else:
                     ok2, km2, val2, pdf2 = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rest, "Restituicao", dt)
@@ -689,7 +1005,6 @@ def iniciar_automacao_completa():
 
     logging.info(f"Fase Banco: {len(uploads)} uploads (Modo Sequencial).")
     if uploads:
-        # ATENÇÃO: Mantendo HEADLESS=TRUE conforme pedido, mas com o delay de segurança
         driver_banco = configurar_driver(headless=True)
         if driver_banco and fazer_login_banco(driver_banco):
             try:
@@ -726,6 +1041,9 @@ def iniciar_automacao_completa():
     sucessos = [d for d in res_final.values() if not d['falhas']]
     falhas = [{'placa': k, 'motivo': v['falhas']} for k, v in res_final.items() if v['falhas']]
     enviar_resumo_telegram(sucessos, falhas)
+    
+    enviar_email_outlook(uploads_confirmados)
+
     logging.info("FIM DO PROCESSO UNIFICADO.")
 
 if __name__ == "__main__":
