@@ -210,6 +210,41 @@ def carregar_tabela_custos_jpr():
         return tabela_jpr
     except: return {}
 
+def calcular_cobranca_individual(tipo_lib, tipo_restituicao, v_base, v_rem, v_base2):
+
+    try:
+        def to_float(val):
+            if isinstance(val, (int, float)): return float(val)
+            try:
+                clean = str(val).replace(',', '.').strip()
+                return float(clean) if clean else 0.0
+            except:
+                return 0.0
+
+        v_base = to_float(v_base)
+        v_rem = to_float(v_rem)
+        v_base2 = to_float(v_base2)
+        tipo_lib = str(tipo_lib).strip()
+        
+        teste = 1 if str(tipo_restituicao).strip() == "Transportadora" else 0
+
+        resultado = 0.0
+
+        if tipo_lib == "Determinação Judicial" and teste == 1:
+            resultado = 0.0
+        
+        elif tipo_lib == "Acordo" and teste == 1:
+            resultado = ((v_base - v_rem) + v_base2) * 1.15
+        
+        elif tipo_lib == "Acordo" and teste == 0:
+            resultado = (v_base - v_rem) * 1.15
+        
+        return max(0.0, resultado)
+
+    except Exception as e:
+        logging.error(f"Erro no cálculo individual: {e}")
+        return 0.0
+
 def sincronizar_dados_dinamicos_local(df_historico, df_ext):
     logging.info("Sincronizando: Local -> Rede -> Histórico...")
     try:
@@ -576,9 +611,7 @@ def enviar_email_outlook(lista_uploads_sucesso):
                 <div class="signature">
                     <p>Atenciosamente,</p>
                     <span class="dev-name">Vinícius Lima</span>
-                    <span class="dev-role">Automação & Otimização de Processos</span>
-                    <br>
-                    <span style="font-size: 12px; color: #888;">Loop Transportes</span>
+                    <span class="dev-role">Loop Transportes</span>
                 </div>
             </div>
 
@@ -611,6 +644,7 @@ def aplicar_calculos_analise(df):
             if col not in df.columns:
                 df[col] = 0.0
             else:
+                df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
 
         if 'Tipo_Restituicao' in df.columns:
@@ -628,30 +662,34 @@ def aplicar_calculos_analise(df):
             df['Transportadora_real'] = ""
 
         def calc_cobranca(row):
-            valor_atual = row.get('Calculo_cobrança')
-            if pd.notna(valor_atual):
-                try:
-                    if float(valor_atual) > 0: return valor_atual
-                except:
-                    if str(valor_atual).strip() != "": return valor_atual
-
+            
             tipo_lib = str(row.get('Tipo_Liberacao', '')).strip()
             teste = row['Teste']
+            
             v_base = row['Valor_Base_Guincho']
             v_rem = row['valor_rem']
             v_base2 = row['Valor_Base_Guincho2']
 
+            resultado = 0.0
+
             if tipo_lib == "Determinação Judicial" and teste == 1:
-                return 0.0
+                resultado = 0.0
+            
             elif tipo_lib == "Acordo" and teste == 1:
-                return ((v_base - v_rem) + v_base2) * 1.15
+                resultado = ((v_base - v_rem) + v_base2) * 1.15
+            
             elif tipo_lib == "Acordo" and teste == 0:
-                return (v_base - v_rem) * 1.15
+                resultado = (v_base - v_rem) * 1.15
+            
             else:
-                return 0.0 
+                resultado = 0.0 
+
+            return max(0.0, resultado)
 
         df['Calculo_cobrança'] = df.apply(calc_cobranca, axis=1)
+        
         return df
+
     except Exception as e:
         logging.error(f"Erro ao aplicar cálculos de análise: {e}")
         return df
@@ -662,6 +700,8 @@ def salvar_historico_parcial(res_final):
         
         try:
             df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+            if 'Calculo_cobrança' not in df_hist.columns:
+                df_hist['Calculo_cobrança'] = 0.0
             df_hist.set_index(COLUNA_PLACA, inplace=True)
         except:
             logging.warning("Histórico não encontrado no salvamento parcial. Criando novo.")
@@ -683,10 +723,11 @@ def salvar_historico_parcial(res_final):
                 df_hist.at[placa, 'km_restituicao'] = dados.get('km_restituicao', 0)
                 df_hist.at[placa, 'valor_rest'] = dados.get('valor_rest', 0)
                 df_hist.at[placa, 'Valor_Base_Guincho2'] = dados.get('Valor_Base_Guincho2', 0)
+                if 'Calculo_cobrança' in dados:
+                    df_hist.at[placa, 'Calculo_cobrança'] = dados['Calculo_cobrança']
                 updates_count += 1
         
         df_hist.reset_index(inplace=True)
-        df_hist = aplicar_calculos_analise(df_hist)
         
         cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
         for col in cols_data:
@@ -717,7 +758,6 @@ def iniciar_automacao_completa():
         df_hist = pd.DataFrame(columns=[COLUNA_PLACA])
     
     df_hist = sincronizar_dados_dinamicos_local(df_hist, df_ext)
-    df_hist = aplicar_calculos_analise(df_hist)
     
     cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
     for col in cols_data:
@@ -807,8 +847,13 @@ def iniciar_automacao_completa():
                 res_final[placa]['valor_rem'] = val
                 res_final[placa]['km_remocao'] = km
                 uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt, 'valor': str(val), 'tipo_str': "Remocao", 'caminho_pdf': pdf})
+                
                 val_orig = row.get('valor_base_db', 0)
+                
                 res_final[placa]['Valor_Base_Guincho2'] = calcular_valor_restituicao_final(transp_atual, row.get('cidade_raw', ''), row.get('patio_raw', ''), categoria_safe, val_orig, tabela_jpr)
+
+                v_cobranca = calcular_cobranca_individual(row.get('Tipo_Liberacao'), row.get('Tipo_Restituicao'), val_orig, val, res_final[placa]['Valor_Base_Guincho2'])
+                res_final[placa]['Calculo_cobrança'] = v_cobranca
             else:
                 logging.error(f"Falha Maps Remo ({placa}): {pdf}")
                 res_final[placa]['falhas'].append(f"Maps Remo: {pdf}")
