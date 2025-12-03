@@ -112,19 +112,36 @@ SELECTORS = {
 def configurar_logger_dinamico():
     try: diretorio_script = os.path.dirname(os.path.abspath(__file__))
     except: diretorio_script = os.getcwd()
+    
     pasta_logs_raiz = os.path.join(diretorio_script, "logs")
     hoje_str = datetime.date.today().strftime("%Y-%m-%d")
     pasta_diaria = os.path.join(pasta_logs_raiz, hoje_str)
     os.makedirs(pasta_diaria, exist_ok=True)
+    
     padrao = os.path.join(pasta_diaria, f"log_{hoje_str}_v*.txt")
     maior = 0
     for arq in glob.glob(padrao):
         try: maior = max(maior, int(os.path.splitext(os.path.basename(arq))[0].split("_v")[-1]))
         except: pass
     nome_log = os.path.join(pasta_diaria, f"log_{hoje_str}_v{maior + 1}.txt")
-    for h in logging.root.handlers[:]: logging.root.removeHandler(h)
-    logging.basicConfig(filename=nome_log, filemode='w', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    print(f"--- Log: {os.path.basename(pasta_diaria)}/{os.path.basename(nome_log)} ---")
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    file_handler = logging.FileHandler(nome_log, mode='w', encoding='utf-8')
+    formatter_file = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(formatter_file)
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    formatter_console = logging.Formatter('%(message)s') 
+    console_handler.setFormatter(formatter_console)
+    logger.addHandler(console_handler)
+
+    print(f"\n📂 Arquivo de Log criado: {os.path.basename(pasta_diaria)}/{os.path.basename(nome_log)}\n")
 
 def limpar_texto_estilo_excel(texto):
     if not isinstance(texto, str): return ""
@@ -161,14 +178,14 @@ def carregar_bases_de_enderecos():
         return {}, {}
 
 def carregar_base_externa_rede():
-    logging.info("Carregando base externa...")
+    logging.info("Carregando base...")
     nome_arquivo_rede = os.path.basename(CAMINHO_BASE_EXTERNA)
     caminho_local_direto = os.path.join(os.getcwd(), nome_arquivo_rede)
     caminho_final = CAMINHO_BASE_EXTERNA
     usando_copia = False
     
     if os.path.exists(caminho_local_direto):
-        logging.info(f"USANDO ARQUIVO LOCAL ENCONTRADO: {caminho_local_direto}")
+        logging.info(f"USANDO ARQUIVO LOCAL: {caminho_local_direto}")
         caminho_final = caminho_local_direto
     elif os.path.exists(CAMINHO_BASE_EXTERNA):
         if "\\" in CAMINHO_BASE_EXTERNA or "//" in CAMINHO_BASE_EXTERNA:
@@ -250,7 +267,16 @@ def sincronizar_dados_dinamicos_local(df_historico, df_ext):
     logging.info("Sincronizando: Local -> Rede -> Histórico...")
     try:
         try:
-            cols_local = [COLUNA_PLACA, 'Status atual', 'Fechamento Solicitação', 'Tipo de liberação', 'Tipo de restituição', 'Data Restituição']
+            cols_local = [
+                COLUNA_PLACA, 
+                'Status atual', 
+                'Fechamento Solicitação', 
+                'Tipo de liberação', 
+                'Tipo de restituição', 
+                'Data Restituição', 
+                'Conferencia SafeDoc' 
+            ]
+            
             df_local_raw = pd.read_excel(NOME_ARQUIVO_EXCEL, sheet_name=NOME_ABA_CALCULOS, dtype=str)
             cols_ex = [c for c in cols_local if c in df_local_raw.columns]
             df_local = df_local_raw[cols_ex].copy()
@@ -261,8 +287,24 @@ def sincronizar_dados_dinamicos_local(df_historico, df_ext):
         except: return df_historico
 
         df_ext_idx = df_ext.set_index('placa_key').to_dict('index') if not df_ext.empty else {}
-        mapa_estatico = {'cpf_db': 'CPF_Banco', 'financiado_db': 'Financiado_Banco', 'contrato_externo': 'Contrato_Externo', 'valor_base_db': 'Valor_Base_Guincho', 'transp_raw': 'Transportadora', 'patio_raw': 'Pátio', 'cidade_raw': 'Cidade convertida', 'Data de Remoção': 'Data de Remoção', 'Marca': 'Marca', 'Modelo': 'Modelo', 'Categoria_Ext': 'Categoria', 'Chassi': 'Chassi'}
-        mapa_dinamico = {'Status atual': 'Status_Atual', 'Fechamento Solicitação': 'Fechamento_Solicitacao', 'Tipo de liberação': 'Tipo_Liberacao', 'Tipo de restituição': 'Tipo_Restituicao', 'Data Restituição': 'Data_Restituicao'}
+        
+        mapa_estatico = {
+            'cpf_db': 'CPF_Banco', 'financiado_db': 'Financiado_Banco', 
+            'contrato_externo': 'Contrato_Externo', 'valor_base_db': 'Valor_Base_Guincho', 
+            'transp_raw': 'Transportadora', 'patio_raw': 'Pátio', 
+            'cidade_raw': 'Cidade convertida', 'Data de Remoção': 'Data de Remoção', 
+            'Marca': 'Marca', 'Modelo': 'Modelo', 
+            'Categoria_Ext': 'Categoria', 'Chassi': 'Chassi'
+        }
+        
+        mapa_dinamico = {
+            'Status atual': 'Status_Atual', 
+            'Fechamento Solicitação': 'Fechamento_Solicitacao', 
+            'Tipo de liberação': 'Tipo_Liberacao', 
+            'Tipo de restituição': 'Tipo_Restituicao', 
+            'Data Restituição': 'Data_Restituicao',
+            'Conferencia SafeDoc': 'Conferencia SafeDoc' 
+        }
 
         for c in list(mapa_estatico.values()) + list(mapa_dinamico.values()):
             if c not in df_historico.columns: df_historico[c] = None
@@ -277,26 +319,33 @@ def sincronizar_dados_dinamicos_local(df_historico, df_ext):
             
             if mask.any():
                 idx = df_historico[mask].index[0]
+                
                 for cr, ch in mapa_estatico.items():
                     val_h = str(df_historico.at[idx, ch]).strip()
                     val_n = str(rede.get(cr, '')).strip()
-                    if val_h in ['nan', 'None', '', 'NaT'] and val_n not in ['nan', 'None', '']: df_historico.at[idx, ch] = val_n
+                    if val_h in ['nan', 'None', '', 'NaT'] and val_n not in ['nan', 'None', '']: 
+                        df_historico.at[idx, ch] = val_n
                 
                 for cl, ch in mapa_dinamico.items():
                     if cl not in local: continue
                     vh = str(df_historico.at[idx, ch]).strip()
                     vl = str(local.get(cl, '')).strip()
+                    
                     if vl not in ['nan', 'None', '']:
                         if vh in ['nan', 'None', '', 'NaT']:
                             df_historico.at[idx, ch] = vl
                             alt_count += 1
                         elif vh != vl:
-                            print(f"\n>>> CONFLITO {placa} ({ch}): Hist='{vh}' vs Local='{vl}'")
-                            resp = input("    Atualizar? (S/N): ").strip().upper()
-                            if resp == 'S': 
+                            if ch == 'Conferencia SafeDoc':
                                 df_historico.at[idx, ch] = vl
                                 alt_count += 1
-                                print("    [ATUALIZADO]")
+                            else:
+                                print(f"\n>>> CONFLITO {placa} ({ch}): Hist='{vh}' vs Local='{vl}'")
+                                resp = input("    Atualizar? (S/N): ").strip().upper()
+                                if resp == 'S': 
+                                    df_historico.at[idx, ch] = vl
+                                    alt_count += 1
+                                    print("    [ATUALIZADO]")
             else:
                 novo = {COLUNA_PLACA: placa}
                 for cr, ch in mapa_estatico.items(): novo[ch] = rede.get(cr, None)
@@ -304,9 +353,17 @@ def sincronizar_dados_dinamicos_local(df_historico, df_ext):
                 novas.append(novo)
 
         if novas: df_historico = pd.concat([df_historico, pd.DataFrame(novas)], ignore_index=True)
+        if 'Tipo_Restituicao' in df_historico.columns:
+            df_historico['Teste'] = df_historico['Tipo_Restituicao'].astype(str).str.strip().apply(
+                lambda x: 1 if x == "Transportadora" else 0
+            )
+        else:
+            df_historico['Teste'] = 0
         logging.info(f"Sincronização: {alt_count} alterações, {len(novas)} novos.")
         return df_historico
-    except: return df_historico
+    except Exception as e: 
+        logging.error(f"Erro na sincronização: {e}")
+        return df_historico
 
 def calcular_valor_restituicao_final(transp_nome, cidade_nome, patio_nome, categoria, valor_remocao, tabela_jpr):
     if 'JPR' not in transp_nome.upper(): return valor_remocao
@@ -393,7 +450,7 @@ def processar_mapa_single_instance(driver, placa, contrato, categoria, url, tipo
 
 def fazer_login_banco(driver):
     try:
-        logging.info("Tentando abrir site do banco...")
+        logging.info("Tentando abrir SafeDoc...")
         driver.get(URL_BANCO)
         driver.maximize_window()
         WebDriverWait(driver, 30).until(ec.presence_of_element_located((By.XPATH, SELECTORS["login"]["usuario"])))
@@ -413,7 +470,7 @@ def fazer_login_banco(driver):
 
 def navegar_menu_gca(driver):
     try:
-        logging.info("Navegando no Menu GCA (Sequencial)...")
+        logging.info("Navegando no Menu...")
         wait = WebDriverWait(driver, 30)
         
         el1 = wait.until(ec.element_to_be_clickable((By.XPATH, SELECTORS["gca_menu"]["link_1"])))
@@ -472,7 +529,7 @@ def enviar_resumo_telegram(sucesso, falha):
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat: return
     try:
-        msg = ["--- 🤖 Resumo Automação UNIFICADA ---"]
+        msg = ["--- 🤖 Resumo Automação ---"]
         if sucesso:
             msg.append("\n✅ SUCESSOS:")
             total = 0
@@ -741,10 +798,68 @@ def salvar_historico_parcial(res_final):
     except Exception as e:
         logging.error(f"Erro ao salvar checkpoint: {e}")
 
+def atualizar_planilha_base_status(lista_placas_sucesso):
+    if not lista_placas_sucesso: return
+    
+    logging.info("💾 Atualizando Status na planilha Base (Preservando formatação)...")
+    try:
+        import openpyxl
+        
+        wb = openpyxl.load_workbook(NOME_ARQUIVO_EXCEL)
+        
+        if NOME_ABA_CALCULOS in wb.sheetnames:
+            ws = wb[NOME_ABA_CALCULOS]
+        else:
+            logging.error(f"❌ Aba '{NOME_ABA_CALCULOS}' não encontrada na Base.")
+            return
+
+        col_placa_idx = None
+        col_status_idx = None
+        header_row_idx = 1
+
+        found_header = False
+        for r in range(1, 6): 
+            row_values = [c.value for c in ws[r]]
+            row_strs = [str(v).strip() if v else "" for v in row_values]
+            
+            if COLUNA_PLACA in row_strs and COLUNA_STATUS_SAFEDOC in row_strs:
+                header_row_idx = r
+                for idx, val in enumerate(row_strs):
+                    if val == COLUNA_PLACA: col_placa_idx = idx + 1
+                    elif val == COLUNA_STATUS_SAFEDOC: col_status_idx = idx + 1
+                found_header = True
+                break
+        
+        if not found_header or not col_placa_idx or not col_status_idx:
+            logging.error("❌ Colunas 'Placa' ou 'Conferencia SafeDoc' não encontradas na Base.")
+            return
+
+        count = 0
+        for row in ws.iter_rows(min_row=header_row_idx + 1):
+            cell_placa = row[col_placa_idx - 1] 
+            cell_status = row[col_status_idx - 1]
+            
+            placa_val = str(cell_placa.value).strip()
+            
+            if placa_val in lista_placas_sucesso:
+                status_atual = str(cell_status.value).strip().upper()
+                if status_atual not in ["FATURADO", "APROVADO"]:
+                    cell_status.value = "Aprovado"
+                    count += 1
+        
+        if count > 0:
+            wb.save(NOME_ARQUIVO_EXCEL)
+            logging.info(f"✅ Base atualizada: {count} placas marcadas como 'Aprovado'.")
+        else:
+            logging.info("ℹ️ Nenhuma alteração necessária na Base.")
+            
+    except Exception as e:
+        logging.error(f"❌ Erro ao atualizar Excel Base (openpyxl): {e}")
+
 # --- MAIN ---
 def iniciar_automacao_completa():
     configurar_logger_dinamico()
-    logging.info("--- Automação Unificada com Conferência Híbrida (SafeDoc + Histórico) ---")
+    logging.info("--- Automação Restituição ---")
 
     dict_transp, dict_patio = carregar_bases_de_enderecos()
     df_ext = carregar_base_externa_rede()
@@ -810,7 +925,7 @@ def iniciar_automacao_completa():
     except: 
         concluidas = []
 
-    logging.info("Iniciando processamento Híbrido (Coluna Status OU Novo Processo)...")
+    logging.info("Iniciando processamento...")
     
     res_final = {}
     uploads = []
@@ -964,12 +1079,12 @@ def iniciar_automacao_completa():
                             logging.error(f"Falha Upload {p}: {txt}")
                             res_final[p]['falhas'].append(f"Banco {d['tipo_str']}: {txt}")
                 else:
-                    logging.error("Falha ao navegar no Menu GCA.")
+                    logging.error("Falha ao navegar no Menu.")
                     for d in uploads: res_final[d['placa']]['falhas'].append("Erro Menu Banco")
             finally:
                 driver_banco.quit()
         else:
-            logging.critical("Falha ao abrir banco ou fazer login.")
+            logging.critical("Falha ao abrir SafeDoc ou fazer login.")
             for d in uploads: res_final[d['placa']]['falhas'].append("Erro Geral Login Banco")
 
     if res_final:
@@ -984,7 +1099,13 @@ def iniciar_automacao_completa():
     enviar_resumo_telegram(sucessos, falhas)
     enviar_email_outlook(uploads_confirmados)
 
-    logging.info("FIM DO PROCESSO UNIFICADO.")
+    placas_para_aprovar = [item['placa'] for item in uploads_confirmados]
+    placas_para_aprovar = list(set(placas_para_aprovar))
+    
+    if placas_para_aprovar:
+        atualizar_planilha_base_status(placas_para_aprovar)
+
+    logging.info("FIM DO PROCESSO.")
 
 if __name__ == "__main__":
     iniciar_automacao_completa()
