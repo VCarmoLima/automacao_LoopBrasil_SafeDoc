@@ -24,11 +24,11 @@ from selenium.webdriver.support.ui import Select
 load_dotenv()
 
 # --- Configurações ---
-NOME_ARQUIVO_EXCEL = "Base_Restituicoes.xlsx"
+NOME_ARQUIVO_EXCEL = os.getenv("CAMINHO_BASE_EXTERNA","Base_Restituicoes.xlsx")
 NOME_ABA_CALCULOS = "Calculos"
 NOME_ABA_BASES = "Bases"
 PASTA_DOWNLOADS = os.getenv("PASTA_DOWNLOADS")
-NOME_ARQUIVO_HISTORICO = "historico_processamento.xlsx"
+NOME_ARQUIVO_HISTORICO = os.getenv("CAMINHO_BASE_EXTERNA","historico_processamento.xlsx")
 
 CAMINHO_BASE_EXTERNA = os.getenv("CAMINHO_BASE_EXTERNA", "remocao-restituicao.xlsx")
 CAMINHO_CUSTO_RESTITUICAO = os.getenv("CAMINHO_CUSTO_RESTITUICAO", "Custo_Restituicao.xlsx")
