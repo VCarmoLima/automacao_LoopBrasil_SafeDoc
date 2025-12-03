@@ -56,6 +56,7 @@ COLUNA_TESTE = "Teste"
 COLUNA_END1 = "Endereço transportadora"
 COLUNA_END2 = "Endereço Pátio"
 COLUNA_END3 = "Cidade convertida"
+COLUNA_STATUS_SAFEDOC = "Conferencia SafeDoc"
 
 URL_BANCO = os.getenv("URL_BANCO")
 USUARIO_BANCO = os.getenv("USUARIO_BANCO")
@@ -743,7 +744,7 @@ def salvar_historico_parcial(res_final):
 # --- MAIN ---
 def iniciar_automacao_completa():
     configurar_logger_dinamico()
-    logging.info("--- Automação Unificada (Fix Rede + Sync Histórico + Maps/Banco SEQUENCIAL) ---")
+    logging.info("--- Automação Unificada com Conferência Híbrida (SafeDoc + Histórico) ---")
 
     dict_transp, dict_patio = carregar_bases_de_enderecos()
     df_ext = carregar_base_externa_rede()
@@ -794,6 +795,7 @@ def iniciar_automacao_completa():
             df.at[i, COLUNA_END2] = dict_patio.get(pn, "")
             cn = str(row.get('cidade_raw', ''))
             df.at[i, COLUNA_END3] = limpar_texto_estilo_excel(cn) if cn != 'nan' else ""
+            
     except Exception as e:
         logging.critical(f"Erro ao preparar dados: {e}")
         return
@@ -803,76 +805,142 @@ def iniciar_automacao_completa():
         for c in ['valor_rem', 'km_remocao']:
             if c in hist_check.columns: hist_check[c] = pd.to_numeric(hist_check[c], errors='coerce').fillna(0)
             else: hist_check[c] = 0
+        
         concluidas = hist_check[ (hist_check['valor_rem'] > 0) | (hist_check['km_remocao'] > 0) ][COLUNA_PLACA].astype(str).str.strip().tolist()
-    except: concluidas = []
+    except: 
+        concluidas = []
 
-    fila = [row for _, row in df.iterrows() if str(row[COLUNA_PLACA]).strip() not in concluidas]
-    
-    if not fila:
-        logging.info("Nada a processar (Todas as placas concluídas).")
-        return
-
-    logging.info(f"Fase Maps: {len(fila)} placas para processar.")
+    logging.info("Iniciando processamento Híbrido (Coluna Status OU Novo Processo)...")
     
     res_final = {}
     uploads = []
     
     driver = configurar_driver(headless=True)
-    if driver:
-        dt = datetime.date.today().strftime("%d-%m-%Y")
-        for row in fila:
-            placa = row[COLUNA_PLACA]
-            contrato_safe = row.get('contrato_externo') or row.get('Contrato') or "S_CONTRATO"
-            categoria_safe = row.get('Categoria_Ext') or row.get('Categoria') or "Leve"
-            transp_atual = str(row.get('transp_raw', '')).strip()
-            end1, end2, end3 = row[COLUNA_END1], row[COLUNA_END2], row[COLUNA_END3]
-            flag_teste = row.get(COLUNA_TESTE, 0)
+    if not driver:
+        return
 
-            if placa not in res_final:
-                res_final[placa] = {
-                    COLUNA_PLACA: placa, 'valor_rem': 0, 'km_remocao': 0, 'valor_rest': 0, 'km_restituicao': 0, 'falhas': [],
-                    'Contrato_Externo': contrato_safe, 'Valor_Base_Guincho': row.get('valor_base_db', ''),
-                    'Transportadora': transp_atual, 'Valor_Base_Guincho2': 0
-                }
+    dt_hoje = datetime.date.today().strftime("%d-%m-%Y")
+    count_processados = 0
 
-            if not end1 or len(str(end1)) < 3:
-                res_final[placa]['falhas'].append("Endereço Transp Inválido")
+    for idx, row in df.iterrows():
+        placa = str(row[COLUNA_PLACA]).strip()
+        if not placa or placa == 'nan': continue
+
+        status_safedoc = str(row.get(COLUNA_STATUS_SAFEDOC, '')).strip().upper()
+        if status_safedoc in ['NAN', 'NONE']: status_safedoc = ""
+
+        executar_remo = False
+        executar_rest = False
+        motivo_acao = ""
+        
+        if status_safedoc in ["APROVADO", "FATURADO"]:
+            continue 
+        
+        elif status_safedoc in ["NEGADO", "DEVOLVIDO"]:
+            executar_remo = True
+            executar_rest = True
+            motivo_acao = f"Forçado por Status {status_safedoc}"
+            
+        elif status_safedoc == "PENDENTE REMO":
+            executar_remo = True
+            executar_rest = False
+            motivo_acao = "Forçado Pendente Remo"
+            
+        elif status_safedoc == "PENDENTE REST":
+            executar_remo = False
+            executar_rest = True
+            motivo_acao = "Forçado Pendente Rest"
+            
+        else:
+            if placa not in concluidas:
+                executar_remo = True
+                executar_rest = True 
+                motivo_acao = "Novo Processo (Status Vazio)"
+            else:
                 continue
 
-            url_rem = f"https://www.google.com/maps/dir/{end1.replace(' ','+')}/{end2.replace(' ','+')}/{end3.replace(' ','+')}/{end1.replace(' ','+')}"
-            url_rest = f"https://www.google.com/maps/dir/{end1.replace(' ','+')}/{end3.replace(' ','+')}/{end1.replace(' ','+')}/{end2.replace(' ','+')}"
+        flag_teste = row.get(COLUNA_TESTE, 0)
+        
+        if executar_rest and flag_teste == 0:
+            executar_rest = False 
+            if "PENDENTE REST" in status_safedoc:
+                logging.warning(f"Placa {placa}: Status pede Restituição, mas flag Teste=0 impede.")
 
-            ok, km, val, pdf = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rem, "Remocao", dt)
+        if not executar_remo and not executar_rest:
+            continue
+
+        count_processados += 1
+        logging.info(f"Processando {placa} | Ação: {motivo_acao} | Remo: {executar_remo}, Rest: {executar_rest}")
+
+        contrato_safe = row.get('contrato_externo') or row.get('Contrato') or "S_CONTRATO"
+        categoria_safe = row.get('Categoria_Ext') or row.get('Categoria') or "Leve"
+        transp_atual = str(row.get('transp_raw', '')).strip()
+        val_orig_db = row.get('valor_base_db', 0)
+        
+        end1, end2, end3 = row[COLUNA_END1], row[COLUNA_END2], row[COLUNA_END3]
+
+        if placa not in res_final:
+            res_final[placa] = {
+                COLUNA_PLACA: placa, 'valor_rem': 0, 'km_remocao': 0, 
+                'valor_rest': 0, 'km_restituicao': 0, 'falhas': [],
+                'Contrato_Externo': contrato_safe, 'Valor_Base_Guincho': val_orig_db,
+                'Transportadora': transp_atual, 'Valor_Base_Guincho2': 0
+            }
+
+        if not end1 or len(str(end1)) < 3:
+            res_final[placa]['falhas'].append("Endereço Transp Inválido")
+            continue
+
+        url_rem = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}"
+        url_rest = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}"
+
+        remo_ok = False
+        val_remo_final = 0.0
+
+        if executar_remo:
+            ok, km, val, pdf = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rem, "Remocao", dt_hoje)
             if ok:
                 res_final[placa]['valor_rem'] = val
                 res_final[placa]['km_remocao'] = km
-                uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt, 'valor': str(val), 'tipo_str': "Remocao", 'caminho_pdf': pdf})
-                
-                val_orig = row.get('valor_base_db', 0)
-                res_final[placa]['Valor_Base_Guincho2'] = calcular_valor_restituicao_final(transp_atual, row.get('cidade_raw', ''), row.get('patio_raw', ''), categoria_safe, val_orig, tabela_jpr)
-
-                v_cobranca = calcular_cobranca_individual(row.get('Tipo_Liberacao'), row.get('Tipo_Restituicao'), val_orig, val, res_final[placa]['Valor_Base_Guincho2'])
-                res_final[placa]['Calculo_cobrança'] = v_cobranca
+                uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt_hoje, 'valor': str(val), 'tipo_str': "Remocao", 'caminho_pdf': pdf})
+                val_remo_final = val
+                remo_ok = True
             else:
                 logging.error(f"Falha Maps Remo ({placa}): {pdf}")
                 res_final[placa]['falhas'].append(f"Maps Remo: {pdf}")
+        else:
+            remo_ok = True 
+            try: val_remo_final = float(res_final[placa].get('valor_rem', 0))
+            except: val_remo_final = 0.0
 
-            if flag_teste == 1 and ok:
-                if not end3: res_final[placa]['falhas'].append("Sem Cidade Destino")
+        res_final[placa]['Valor_Base_Guincho2'] = calcular_valor_restituicao_final(transp_atual, row.get('cidade_raw', ''), row.get('patio_raw', ''), categoria_safe, val_orig_db, tabela_jpr)
+        v_cobranca = calcular_cobranca_individual(row.get('Tipo_Liberacao'), row.get('Tipo_Restituicao'), val_orig_db, val_remo_final, res_final[placa]['Valor_Base_Guincho2'])
+        res_final[placa]['Calculo_cobrança'] = v_cobranca
+
+        if executar_rest:
+            if remo_ok: 
+                if not end3:
+                    res_final[placa]['falhas'].append("Sem Cidade Destino")
                 else:
-                    ok2, km2, val2, pdf2 = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rest, "Restituicao", dt)
+                    ok2, km2, val2, pdf2 = processar_mapa_single_instance(driver, placa, contrato_safe, categoria_safe, url_rest, "Restituicao", dt_hoje)
                     if ok2:
                         res_final[placa]['valor_rest'] = val2
                         res_final[placa]['km_restituicao'] = km2
-                        uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt, 'valor': str(val2), 'tipo_str': "Restituicao", 'caminho_pdf': pdf2})
+                        uploads.append({'placa': placa, 'contrato': contrato_safe, 'data': dt_hoje, 'valor': str(val2), 'tipo_str': "Restituicao", 'caminho_pdf': pdf2})
                     else:
                         res_final[placa]['falhas'].append(f"Maps Rest: {pdf2}")
-        driver.quit()
+            else:
+                logging.warning(f"Restituição pulada para {placa} pois Remoção falhou.")
+
+    driver.quit()
+    
+    if count_processados == 0:
+        logging.info("Nenhuma placa elegível para processamento nesta rodada.")
+        return
 
     salvar_historico_parcial(res_final)
 
-    logging.info(f"Fase Banco: {len(uploads)} uploads (Modo Sequencial).")
-    
+    logging.info(f"Fase Banco: {len(uploads)} uploads pendentes.")
     uploads_confirmados = [] 
 
     if uploads:
