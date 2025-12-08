@@ -149,6 +149,18 @@ def limpar_texto_estilo_excel(texto):
     texto_sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
     return " ".join(re.sub(r'[^A-Z0-9\s]', '', texto_sem_acento.upper()).split())
 
+def formatar_moeda_br(valor):
+    try:
+        if valor is None or str(valor).strip() == "": return "0,00"
+        if isinstance(valor, str) and ',' in valor and '.' not in valor: return valor
+        
+        val_str = str(valor).replace(',', '.')
+        val_float = float(val_str)
+        
+        return f"{val_float:.2f}".replace('.', ',')
+    except:
+        return "0,00"
+
 def formatar_data_ptbr(valor):
     if pd.isna(valor) or str(valor).strip() in ['', 'nan', 'None', 'NaT']: return ""
     
@@ -754,26 +766,24 @@ def salvar_historico_parcial(res_final):
         except:
             df_hist = pd.DataFrame(list(res_final.values()))
             df_hist = aplicar_calculos_analise(df_hist, lista_placas_processadas=None)
-            df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
-            return
-
+            
         cols_to_fix = [
             'km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest', 
             'Valor_Base_Guincho2', 'Valor_Base_Guincho',
             'Tipo_Liberacao', 'Tipo_Restituicao', 
-            'Transportadora', 'Contrato_Externo'
+            'Transportadora', 'Contrato_Externo',
+            'Conferencia SafeDoc'
         ]
+        
         for col in cols_to_fix:
-            if col not in df_hist.columns:
-                df_hist[col] = None
+            if col not in df_hist.columns: df_hist[col] = None
             df_hist[col] = df_hist[col].astype('object')
 
         placas_existentes = df_hist[COLUNA_PLACA].unique()
         novas_linhas = [dados for p, dados in res_final.items() if p not in placas_existentes]
-        
         if novas_linhas:
             df_hist = pd.concat([df_hist, pd.DataFrame(novas_linhas)], ignore_index=True)
-            for col in cols_to_fix:
+            for col in cols_to_fix: 
                 if col in df_hist.columns: df_hist[col] = df_hist[col].astype('object')
 
         df_hist.set_index(COLUNA_PLACA, inplace=True)
@@ -781,17 +791,14 @@ def salvar_historico_parcial(res_final):
         
         for placa, dados in res_final.items():
             if placa in df_hist.index:
-                df_hist.at[placa, 'km_remocao'] = dados.get('km_remocao', 0)
-                df_hist.at[placa, 'valor_rem'] = dados.get('valor_rem', 0)
-                df_hist.at[placa, 'km_restituicao'] = dados.get('km_restituicao', 0)
-                df_hist.at[placa, 'valor_rest'] = dados.get('valor_rest', 0)
-                df_hist.at[placa, 'Valor_Base_Guincho2'] = dados.get('Valor_Base_Guincho2', 0)
-                df_hist.at[placa, 'Valor_Base_Guincho'] = dados.get('Valor_Base_Guincho', 0)
-                
-                if dados.get('Tipo_Liberacao'): 
-                    df_hist.at[placa, 'Tipo_Liberacao'] = dados.get('Tipo_Liberacao')
-                if dados.get('Tipo_Restituicao'): 
-                    df_hist.at[placa, 'Tipo_Restituicao'] = dados.get('Tipo_Restituicao')
+                campos = [
+                    'km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest', 
+                    'Valor_Base_Guincho2', 'Valor_Base_Guincho', 'Tipo_Liberacao', 
+                    'Tipo_Restituicao', 'Conferencia SafeDoc'
+                ]
+                for campo in campos:
+                    val = dados.get(campo)
+                    if val is not None: df_hist.at[placa, campo] = val
                 
                 updates_count += 1
         
@@ -802,8 +809,12 @@ def salvar_historico_parcial(res_final):
 
         cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
         for col in cols_data:
+            if col in df_hist.columns: df_hist[col] = df_hist[col].apply(formatar_data_ptbr)
+
+        cols_moeda = ['valor_rem', 'valor_rest', 'Valor_Base_Guincho', 'Valor_Base_Guincho2', 'Calculo_cobrança']
+        for col in cols_moeda:
             if col in df_hist.columns:
-                df_hist[col] = df_hist[col].apply(formatar_data_ptbr)
+                df_hist[col] = df_hist[col].apply(formatar_moeda_br)
 
         df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
         logging.info(f"CHECKPOINT: Histórico atualizado ({updates_count} placas).")
@@ -1118,6 +1129,14 @@ def iniciar_automacao_completa():
     placas_para_aprovar = list(set(placas_para_aprovar))
     
     if placas_para_aprovar:
+        logging.info("Atualizando status 'Aprovado' no Histórico e na Base...")
+        
+        for p in placas_para_aprovar:
+            if p in res_final:
+                res_final[p]['Conferencia SafeDoc'] = "Aprovado"
+        
+        salvar_historico_parcial(res_final)
+
         atualizar_planilha_base_status(placas_para_aprovar)
 
     logging.info("FIM DO PROCESSO.")
