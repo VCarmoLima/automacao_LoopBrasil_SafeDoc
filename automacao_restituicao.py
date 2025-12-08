@@ -24,11 +24,11 @@ from selenium.webdriver.support.ui import Select
 load_dotenv()
 
 # --- Configurações ---
-NOME_ARQUIVO_EXCEL = os.getenv("CAMINHO_BASE_EXTERNA","Base_Restituicoes.xlsx")
+NOME_ARQUIVO_EXCEL = os.getenv("NOME_ARQUIVO_EXCEL","Base_Restituicoes.xlsx")
 NOME_ABA_CALCULOS = "Calculos"
 NOME_ABA_BASES = "Bases"
 PASTA_DOWNLOADS = os.getenv("PASTA_DOWNLOADS")
-NOME_ARQUIVO_HISTORICO = os.getenv("CAMINHO_BASE_EXTERNA","historico_processamento.xlsx")
+NOME_ARQUIVO_HISTORICO = os.getenv("NOME_ARQUIVO_HISTORICO","historico_processamento.xlsx")
 
 CAMINHO_BASE_EXTERNA = os.getenv("CAMINHO_BASE_EXTERNA", "remocao-restituicao.xlsx")
 CAMINHO_CUSTO_RESTITUICAO = os.getenv("CAMINHO_CUSTO_RESTITUICAO", "Custo_Restituicao.xlsx")
@@ -113,7 +113,7 @@ def configurar_logger_dinamico():
     try: diretorio_script = os.path.dirname(os.path.abspath(__file__))
     except: diretorio_script = os.getcwd()
     
-    pasta_logs_raiz = os.path.join(diretorio_script, "logs")
+    pasta_logs_raiz = os.path.join(diretorio_script, ".logs")
     hoje_str = datetime.date.today().strftime("%Y-%m-%d")
     pasta_diaria = os.path.join(pasta_logs_raiz, hoje_str)
     os.makedirs(pasta_diaria, exist_ok=True)
@@ -571,7 +571,7 @@ def enviar_email_outlook(lista_uploads_sucesso):
         except: diretorio_script = os.getcwd()
         
         hoje_str_log = datetime.date.today().strftime("%Y-%m-%d")
-        pasta_logs_hoje = os.path.join(diretorio_script, "logs", hoje_str_log)
+        pasta_logs_hoje = os.path.join(diretorio_script, ".logs", hoje_str_log)
         
         qtd_logs = len(glob.glob(os.path.join(pasta_logs_hoje, "log_*.txt")))
         versao = qtd_logs if qtd_logs > 0 else 1
@@ -730,10 +730,7 @@ def aplicar_calculos_analise(df):
 
             resultado = 0.0
 
-            if tipo_lib == "Determinação Judicial" and teste == 1:
-                resultado = 0.0
-            
-            elif tipo_lib == "Acordo" and teste == 1:
+            if tipo_lib == "Acordo" and teste == 1:
                 resultado = ((v_base - v_rem) + v_base2) * 1.15
             
             elif tipo_lib == "Acordo" and teste == 0:
