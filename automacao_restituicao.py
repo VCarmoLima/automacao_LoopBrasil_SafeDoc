@@ -693,7 +693,7 @@ def enviar_email_outlook(lista_uploads_sucesso):
     except Exception as e:
         logging.error(f"Erro ao enviar e-mail via Outlook: {e}")
 
-def aplicar_calculos_analise(df):
+def aplicar_calculos_analise(df, lista_placas_processadas=None):
     try:
         logging.info("Aplicando cálculos de análise...")
         
@@ -705,43 +705,38 @@ def aplicar_calculos_analise(df):
                 df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
 
+        if 'Calculo_cobrança' not in df.columns:
+            df['Calculo_cobrança'] = 0.0
+
+        if lista_placas_processadas:
+            filtro = df[COLUNA_PLACA].isin(lista_placas_processadas)
+        else:
+            filtro = slice(None)
+
         if 'Tipo_Restituicao' in df.columns:
-            df['Teste'] = df['Tipo_Restituicao'].astype(str).str.strip().apply(
+            df.loc[filtro, 'Teste'] = df.loc[filtro, 'Tipo_Restituicao'].astype(str).str.strip().apply(
                 lambda x: 1 if x == "Transportadora" else 0
             )
-        else:
-            df['Teste'] = 0
-
-        if 'Transportadora' in df.columns:
-            df['Transportadora_real'] = df.apply(
-                lambda row: row['Transportadora'] if row['Teste'] == 1 else "", axis=1
-            )
-        else:
-            df['Transportadora_real'] = ""
-
+        
         def calc_cobranca(row):
-            
-            tipo_lib = str(row.get('Tipo_Liberacao', '')).strip()
-            teste = row['Teste']
-            
-            v_base = row['Valor_Base_Guincho']
-            v_rem = row['valor_rem']
-            v_base2 = row['Valor_Base_Guincho2']
+            try:
+                tipo_lib = str(row.get('Tipo_Liberacao', '')).strip()
+                teste = row.get('Teste', 0)
+                v_base = float(row.get('Valor_Base_Guincho', 0))
+                v_rem = float(row.get('valor_rem', 0))
+                v_base2 = float(row.get('Valor_Base_Guincho2', 0))
 
-            resultado = 0.0
+                resultado = 0.0
+                if tipo_lib == "Acordo" and teste == 1:
+                    resultado = ((v_base - v_rem) + v_base2) * 1.15
+                elif tipo_lib == "Acordo" and teste == 0:
+                    resultado = (v_base - v_rem) * 1.15
+                
+                return max(0.0, resultado)
+            except:
+                return 0.0
 
-            if tipo_lib == "Acordo" and teste == 1:
-                resultado = ((v_base - v_rem) + v_base2) * 1.15
-            
-            elif tipo_lib == "Acordo" and teste == 0:
-                resultado = (v_base - v_rem) * 1.15
-            
-            else:
-                resultado = 0.0 
-
-            return max(0.0, resultado)
-
-        df['Calculo_cobrança'] = df.apply(calc_cobranca, axis=1)
+        df.loc[filtro, 'Calculo_cobrança'] = df.loc[filtro].apply(calc_cobranca, axis=1)
         
         return df
 
@@ -755,22 +750,35 @@ def salvar_historico_parcial(res_final):
         
         try:
             df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
-            if 'Calculo_cobrança' not in df_hist.columns:
-                df_hist['Calculo_cobrança'] = 0.0
-            df_hist.set_index(COLUNA_PLACA, inplace=True)
+            df_hist[COLUNA_PLACA] = df_hist[COLUNA_PLACA].astype(str).str.strip()
         except:
-            logging.warning("Histórico não encontrado no salvamento parcial. Criando novo.")
-            df_hist = pd.DataFrame(res_final.values())
-            df_hist = aplicar_calculos_analise(df_hist)
+            df_hist = pd.DataFrame(list(res_final.values()))
+            df_hist = aplicar_calculos_analise(df_hist, lista_placas_processadas=None)
             df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
             return
 
-        cols_to_fix = ['km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest', 'Valor_Base_Guincho2']
+        cols_to_fix = [
+            'km_remocao', 'valor_rem', 'km_restituicao', 'valor_rest', 
+            'Valor_Base_Guincho2', 'Valor_Base_Guincho',
+            'Tipo_Liberacao', 'Tipo_Restituicao', 
+            'Transportadora', 'Contrato_Externo'
+        ]
         for col in cols_to_fix:
-            if col in df_hist.columns:
-                df_hist[col] = df_hist[col].astype('object')
+            if col not in df_hist.columns:
+                df_hist[col] = None
+            df_hist[col] = df_hist[col].astype('object')
 
+        placas_existentes = df_hist[COLUNA_PLACA].unique()
+        novas_linhas = [dados for p, dados in res_final.items() if p not in placas_existentes]
+        
+        if novas_linhas:
+            df_hist = pd.concat([df_hist, pd.DataFrame(novas_linhas)], ignore_index=True)
+            for col in cols_to_fix:
+                if col in df_hist.columns: df_hist[col] = df_hist[col].astype('object')
+
+        df_hist.set_index(COLUNA_PLACA, inplace=True)
         updates_count = 0
+        
         for placa, dados in res_final.items():
             if placa in df_hist.index:
                 df_hist.at[placa, 'km_remocao'] = dados.get('km_remocao', 0)
@@ -778,19 +786,27 @@ def salvar_historico_parcial(res_final):
                 df_hist.at[placa, 'km_restituicao'] = dados.get('km_restituicao', 0)
                 df_hist.at[placa, 'valor_rest'] = dados.get('valor_rest', 0)
                 df_hist.at[placa, 'Valor_Base_Guincho2'] = dados.get('Valor_Base_Guincho2', 0)
-                if 'Calculo_cobrança' in dados:
-                    df_hist.at[placa, 'Calculo_cobrança'] = dados['Calculo_cobrança']
+                df_hist.at[placa, 'Valor_Base_Guincho'] = dados.get('Valor_Base_Guincho', 0)
+                
+                if dados.get('Tipo_Liberacao'): 
+                    df_hist.at[placa, 'Tipo_Liberacao'] = dados.get('Tipo_Liberacao')
+                if dados.get('Tipo_Restituicao'): 
+                    df_hist.at[placa, 'Tipo_Restituicao'] = dados.get('Tipo_Restituicao')
+                
                 updates_count += 1
         
         df_hist.reset_index(inplace=True)
         
+        placas_da_rodada = [str(k).strip() for k in res_final.keys()]
+        df_hist = aplicar_calculos_analise(df_hist, lista_placas_processadas=placas_da_rodada)
+
         cols_data = ['Data de Remoção', 'Data Restituição', 'Fechamento Solicitação']
         for col in cols_data:
             if col in df_hist.columns:
                 df_hist[col] = df_hist[col].apply(formatar_data_ptbr)
 
         df_hist.to_excel(NOME_ARQUIVO_HISTORICO, index=False)
-        logging.info(f"CHECKPOINT: KMs atualizados em {updates_count} placas.")
+        logging.info(f"CHECKPOINT: Histórico atualizado ({updates_count} placas).")
         
     except Exception as e:
         logging.error(f"Erro ao salvar checkpoint: {e}")
@@ -996,7 +1012,9 @@ def iniciar_automacao_completa():
                 COLUNA_PLACA: placa, 'valor_rem': 0, 'km_remocao': 0, 
                 'valor_rest': 0, 'km_restituicao': 0, 'falhas': [],
                 'Contrato_Externo': contrato_safe, 'Valor_Base_Guincho': val_orig_db,
-                'Transportadora': transp_atual, 'Valor_Base_Guincho2': 0
+                'Transportadora': transp_atual, 'Valor_Base_Guincho2': 0,
+                'Tipo_Liberacao': row.get('Tipo de liberação'),  
+                'Tipo_Restituicao': row.get('Tipo de restituição')
             }
 
         if not end1 or len(str(end1)) < 3:
@@ -1094,7 +1112,7 @@ def iniciar_automacao_completa():
     falhas = [{'placa': k, 'motivo': v['falhas']} for k, v in res_final.items() if v['falhas']]
     
     enviar_resumo_telegram(sucessos, falhas)
-    enviar_email_outlook(uploads_confirmados)
+    #enviar_email_outlook(uploads_confirmados)
 
     placas_para_aprovar = [item['placa'] for item in uploads_confirmados]
     placas_para_aprovar = list(set(placas_para_aprovar))
