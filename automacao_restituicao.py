@@ -440,13 +440,51 @@ def get_valor_por_range(categoria, km_numerico):
 
 def gerar_pdf_mapa(driver, nome_arquivo_pdf):
     try:
-        WebDriverWait(driver, 20).until(ec.visibility_of_element_located((By.TAG_NAME, "canvas")))
-        time.sleep(1)
-        result = driver.execute_cdp_cmd("Page.printToPDF", {"landscape": False, "displayHeaderFooter": True, "printBackground": True, "marginTop": 1, "marginBottom": 1, "marginLeft": 0.5, "marginRight": 0.5})
+        # --- AJUSTE VISUAL (SIMULAR MAPA CINZA) ---
+        script_simular_cinza = """
+            var style = document.createElement('style');
+            style.innerHTML = `
+                /* 1. Torna o desenho das ruas (canvas) invisível, 
+                   mas MANTÉM o espaço ocupado (não quebra o layout) */
+                canvas {
+                    visibility: hidden !important;
+                }
+                
+                /* 2. Força o fundo cinza na área onde o mapa estaria   
+                   (Simula o carregamento) */
+                .widget-scene, 
+                #scene, 
+                div[aria-label="Mapa"], 
+                div[aria-label="Map"] {
+                    background-color: #e6e6e6 !important;
+                }
+            `;
+            document.head.appendChild(style);
+        """
+        driver.execute_script(script_simular_cinza)
+        
+        # Pequena pausa apenas para garantir a injeção do estilo
+        time.sleep(0.5)
+
+        # --- GERAÇÃO DO PDF ---
+        result = driver.execute_cdp_cmd("Page.printToPDF", {
+            "landscape": False, 
+            "displayHeaderFooter": True, 
+            "printBackground": True, 
+            "marginTop": 1, 
+            "marginBottom": 1, 
+            "marginLeft": 0.5, 
+            "marginRight": 0.5
+        })
+        
         caminho_completo = os.path.join(PASTA_DOWNLOADS, nome_arquivo_pdf)
-        with open(caminho_completo, "wb") as f: f.write(base64.b64decode(result['data']))
+        with open(caminho_completo, "wb") as f: 
+            f.write(base64.b64decode(result['data']))
+        
         return caminho_completo
-    except: return None
+    except Exception as e: 
+        logging.error(f"Erro ao gerar PDF: {e}")
+        return None
 
 def processar_mapa_single_instance(driver, placa, contrato, categoria, url, tipo, data):
     try:
@@ -949,6 +987,12 @@ def iniciar_automacao_completa():
     except: 
         concluidas = []
 
+    dict_memoria = {}
+    if 'hist_check' in locals() and not hist_check.empty and COLUNA_PLACA in hist_check.columns:
+        try:
+            dict_memoria = hist_check.set_index(COLUNA_PLACA).to_dict('index')
+        except: pass
+
     logging.info("Iniciando processamento...")
     
     res_final = {}
@@ -964,28 +1008,31 @@ def iniciar_automacao_completa():
     for idx, row in df.iterrows():
         placa = str(row[COLUNA_PLACA]).strip()
         if not placa or placa == 'nan': continue
-
+        
         status_safedoc = str(row.get(COLUNA_STATUS_SAFEDOC, '')).strip().upper()
         if status_safedoc in ['NAN', 'NONE']: status_safedoc = ""
+
+        nfkd = unicodedata.normalize('NFKD', status_safedoc)
+        status_limpo = "".join([c for c in nfkd if not unicodedata.combining(c)])
 
         executar_remo = False
         executar_rest = False
         motivo_acao = ""
         
-        if status_safedoc in ["APROVADO", "FATURADO"]:
+        if status_limpo in ["APROVADO", "FATURADO"]:
             continue 
-        
-        elif status_safedoc in ["NEGADO", "DEVOLVIDO"]:
+            
+        elif status_limpo in ["NEGADO", "DEVOLVIDO"]:
             executar_remo = True
             executar_rest = True
             motivo_acao = f"Forçado por Status {status_safedoc}"
             
-        elif status_safedoc == "PENDENTE REMO":
+        elif "PENDENTE REMO" in status_limpo:
             executar_remo = True
             executar_rest = False
             motivo_acao = "Forçado Pendente Remo"
             
-        elif status_safedoc == "PENDENTE REST":
+        elif "PENDENTE REST" in status_limpo:
             executar_remo = False
             executar_rest = True
             motivo_acao = "Forçado Pendente Rest"
@@ -1027,6 +1074,17 @@ def iniciar_automacao_completa():
                 'Tipo_Liberacao': row.get('Tipo de liberação'),  
                 'Tipo_Restituicao': row.get('Tipo de restituição')
             }
+
+        if placa in dict_memoria:
+            mem = dict_memoria[placa]
+            
+            def validar_mem(v):
+                return v is not None and pd.notna(v) and str(v).lower() != 'nan'
+
+            if validar_mem(mem.get('valor_rem')): res_final[placa]['valor_rem'] = mem.get('valor_rem')
+            if validar_mem(mem.get('km_remocao')): res_final[placa]['km_remocao'] = mem.get('km_remocao')
+            if validar_mem(mem.get('valor_rest')): res_final[placa]['valor_rest'] = mem.get('valor_rest')
+            if validar_mem(mem.get('km_restituicao')): res_final[placa]['km_restituicao'] = mem.get('km_restituicao')
 
         if not end1 or len(str(end1)) < 3:
             res_final[placa]['falhas'].append("Endereço Transp Inválido")
@@ -1123,7 +1181,7 @@ def iniciar_automacao_completa():
     falhas = [{'placa': k, 'motivo': v['falhas']} for k, v in res_final.items() if v['falhas']]
     
     enviar_resumo_telegram(sucessos, falhas)
-    #enviar_email_outlook(uploads_confirmados)
+    enviar_email_outlook(uploads_confirmados)
 
     placas_para_aprovar = [item['placa'] for item in uploads_confirmados]
     placas_para_aprovar = list(set(placas_para_aprovar))
