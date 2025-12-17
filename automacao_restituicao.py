@@ -13,6 +13,11 @@ import unicodedata
 import re
 import shutil
 import win32com.client as win32
+import pyodbc
+import warnings
+
+warnings.filterwarnings("ignore", message=".*pandas only supports SQLAlchemy.*")
+
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -24,14 +29,14 @@ from selenium.webdriver.support.ui import Select
 load_dotenv()
 
 # --- Configurações ---
-NOME_ARQUIVO_EXCEL = os.getenv("NOME_ARQUIVO_EXCEL","Base_Restituicoes.xlsx")
+NOME_ARQUIVO_EXCEL = os.getenv("NOME_ARQUIVO_EXCEL")
 NOME_ABA_CALCULOS = "Calculos"
 NOME_ABA_BASES = "Bases"
 PASTA_DOWNLOADS = os.getenv("PASTA_DOWNLOADS")
-NOME_ARQUIVO_HISTORICO = os.getenv("NOME_ARQUIVO_HISTORICO","historico_processamento.xlsx")
+NOME_ARQUIVO_HISTORICO = os.getenv("NOME_ARQUIVO_HISTORICO")
 
-CAMINHO_BASE_EXTERNA = os.getenv("CAMINHO_BASE_EXTERNA", "remocao-restituicao.xlsx")
-CAMINHO_CUSTO_RESTITUICAO = os.getenv("CAMINHO_CUSTO_RESTITUICAO", "Custo_Restituicao.xlsx")
+CAMINHO_BASE_EXTERNA = os.getenv("CAMINHO_BASE_EXTERNA")
+CAMINHO_CUSTO_RESTITUICAO = os.getenv("CAMINHO_CUSTO_RESTITUICAO")
 
 COLUNAS_EXTERNAS_MAP = {
     'Placa': 'placa_key',
@@ -190,7 +195,33 @@ def carregar_bases_de_enderecos():
         return {}, {}
 
 def carregar_base_externa_rede():
-    logging.info("Carregando base...")
+    logging.info("Tentando carregar dados via Banco de Dados (SQL)...")
+    
+    try:
+        conn_str = os.getenv("DB_CONNECTION_STRING")
+        conn = pyodbc.connect(conn_str, timeout=10) 
+        
+        cols_sql = list(COLUNAS_EXTERNAS_MAP.keys())
+        cols_str = ", ".join([f'"{c}"' for c in cols_sql])
+        tabela_banco = os.getenv("DB_TABLE_NAME")
+        query = f"SELECT {cols_str} FROM {tabela_banco}"
+        
+        df_ext = pd.read_sql(query, conn)
+        conn.close()
+        
+        df_ext.rename(columns=COLUNAS_EXTERNAS_MAP, inplace=True)
+        
+        if 'placa_key' in df_ext.columns:
+            df_ext['placa_key'] = df_ext['placa_key'].astype(str).str.strip().str.upper()
+            df_ext.drop_duplicates(subset=['placa_key'], inplace=True)
+            
+        logging.info(f"✅ SUCESSO SQL: Base carregada do Banco com {len(df_ext)} linhas.")
+        return df_ext
+
+    except Exception as e:
+        logging.warning(f"⚠️ FALHA SQL: Não foi possível acessar o banco. Motivo: {e}")
+        logging.info("🔄 Ativando PLANO B: Tentando carregar via Planilha Excel...")
+
     nome_arquivo_rede = os.path.basename(CAMINHO_BASE_EXTERNA)
     caminho_local_direto = os.path.join(os.getcwd(), nome_arquivo_rede)
     caminho_final = CAMINHO_BASE_EXTERNA
@@ -210,21 +241,26 @@ def carregar_base_externa_rede():
             except Exception as e:
                 logging.error(f"Erro cópia rede: {e}")
     else:
-        logging.critical(f"Arquivo não encontrado: {CAMINHO_BASE_EXTERNA}")
+        logging.critical(f"❌ FALHA TOTAL: Banco indisponível e Arquivo Excel não encontrado: {CAMINHO_BASE_EXTERNA}")
         return pd.DataFrame()
 
     try:
         df_ext = pd.read_excel(caminho_final, sheet_name="remocao", usecols=list(COLUNAS_EXTERNAS_MAP.keys()), engine='openpyxl', dtype=str)
         df_ext.rename(columns=COLUNAS_EXTERNAS_MAP, inplace=True)
+        
         if 'placa_key' in df_ext.columns:
             df_ext['placa_key'] = df_ext['placa_key'].str.strip().str.upper()
             df_ext.drop_duplicates(subset=['placa_key'], inplace=True)
+            
+        logging.info(f"✅ SUCESSO EXCEL: Base carregada da Planilha com {len(df_ext)} linhas.")
         
-        logging.info(f"Base Externa carregada com {len(df_ext)} linhas.")
-        if usando_copia and os.path.exists(caminho_final): os.remove(caminho_final)
+        if usando_copia and os.path.exists(caminho_final): 
+            os.remove(caminho_final)
+            
         return df_ext
+        
     except Exception as e:
-        logging.critical(f"Erro leitura externa: {e}")
+        logging.critical(f"❌ FALHA LEITURA EXCEL: {e}")
         return pd.DataFrame()
 
 def carregar_tabela_custos_jpr():
@@ -440,33 +476,13 @@ def get_valor_por_range(categoria, km_numerico):
 
 def gerar_pdf_mapa(driver, nome_arquivo_pdf):
     try:
-        # --- AJUSTE VISUAL (SIMULAR MAPA CINZA) ---
-        script_simular_cinza = """
-            var style = document.createElement('style');
-            style.innerHTML = `
-                /* 1. Torna o desenho das ruas (canvas) invisível, 
-                   mas MANTÉM o espaço ocupado (não quebra o layout) */
-                canvas {
-                    visibility: hidden !important;
-                }
-                
-                /* 2. Força o fundo cinza na área onde o mapa estaria   
-                   (Simula o carregamento) */
-                .widget-scene, 
-                #scene, 
-                div[aria-label="Mapa"], 
-                div[aria-label="Map"] {
-                    background-color: #e6e6e6 !important;
-                }
-            `;
-            document.head.appendChild(style);
-        """
-        driver.execute_script(script_simular_cinza)
-        
-        # Pequena pausa apenas para garantir a injeção do estilo
-        time.sleep(0.5)
+        try:
+            WebDriverWait(driver, 20).until(ec.presence_of_element_located((By.TAG_NAME, "canvas")))
+        except:
+            logging.warning("Aviso: Canvas do mapa não detectado, gerando PDF mesmo assim.")
 
-        # --- GERAÇÃO DO PDF ---
+        time.sleep(4)
+
         result = driver.execute_cdp_cmd("Page.printToPDF", {
             "landscape": False, 
             "displayHeaderFooter": True, 
@@ -578,32 +594,96 @@ def preencher_formulario_com_upload(driver, dados_upload, texto_ant=None):
 def enviar_resumo_telegram(sucesso, falha):
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat: return
+
     try:
-        msg = ["--- 🤖 Resumo Automação ---"]
+        msg = []
+        data_hoje = datetime.date.today().strftime('%d/%m/%Y')
+        msg.append(f"🤖 <b>RESUMO AUTOMAÇÃO - {data_hoje}</b>")
+        msg.append("")
+
         if sucesso:
-            msg.append("\n✅ SUCESSOS:")
+            msg.append("✅ <b>SUCESSOS DO DIA:</b>")
             total = 0
             for item in sucesso:
-                msg.append(f"\nPlaca: {item[COLUNA_PLACA]}")
-                for k in ['valor_rem', 'valor_rest']:
+                placa = item.get(COLUNA_PLACA, 'DESCONHECIDO')
+                
+                valores_msg = []
+                for k, label in [('valor_rem', 'Remoção'), ('valor_rest', 'Restituição')]:
                     try:
-                        val = int(item.get(k, 0))
-                        if val > 0: 
+                        val = float(item.get(k, 0))
+                        if val > 0:
                             total += val
-                            tipo = "Remoção" if k == 'valor_rem' else "Restituição"
-                            msg.append(f"  • {tipo}: R$ {val},00")
+                            valores_msg.append(f"{label}: R$ {val:,.2f}".replace('.', ','))
                     except: pass
-                if 'JPR' in str(item.get('Transportadora', '')).upper():
-                    msg.append(f"  • (JPR): R$ {item.get('Valor_Base_Guincho2')}")
-            msg.append(f"\n💰 Total: R$ {total},00")
+                
+                detalhe_valores = " | ".join(valores_msg)
+                msg.append(f"🚗 <code>{placa}</code> » {detalhe_valores}")
+
+            msg.append(f"\n💰 <b>TOTAL LANÇADO: R$ {total:,.2f}</b>".replace('.', ','))
+            msg.append("")
+
         if falha:
-            msg.append("\n\n❌ FALHAS:")
-            for item in falha: msg.append(f"  • {item.get('placa', '?')}: {item.get('motivo', 'Erro')}")
-            
+            msg.append("❌ <b>FALHAS / ERROS:</b>")
+            for item in falha:
+                msg.append(f"⚠️ {item.get('placa', '?')}: {item.get('motivo', 'Erro')}")
+            msg.append("")
+
+        msg.append("━━━━━━━━━━━━━━━━━━")
+        msg.append("🚛 <b>RESTITUIÇÕES PENDENTES (Transp.)</b>")
+        
+        try:
+            if os.path.exists(NOME_ARQUIVO_HISTORICO):
+                df_hist = pd.read_excel(NOME_ARQUIVO_HISTORICO)
+                
+                col_status = 'Status_Atual' if 'Status_Atual' in df_hist.columns else None
+                col_tipo = 'Tipo_Restituicao' if 'Tipo_Restituicao' in df_hist.columns else None
+                col_placa = COLUNA_PLACA if COLUNA_PLACA in df_hist.columns else None
+                col_transp = 'Transportadora' if 'Transportadora' in df_hist.columns else None
+
+                if col_status and col_tipo and col_placa:
+                    filtro_transp = df_hist[col_tipo].astype(str).str.strip() == "Transportadora"
+                    
+                    status_series = df_hist[col_status].astype(str).str.strip().str.upper()
+                    filtro_pendente = status_series != "RESTITUIÇÃO CONCLUÍDA".upper()
+                    
+                    df_pendentes = df_hist[filtro_transp & filtro_pendente].copy()
+
+                    if not df_pendentes.empty:
+                        if col_transp:
+                            df_pendentes[col_transp] = df_pendentes[col_transp].fillna("SEM NOME")
+                            grupos = df_pendentes.groupby(col_transp)[col_placa].apply(list)
+                            
+                            for transp, lista_placas in grupos.items():
+                                qtd = len(lista_placas)
+                                nome_transp = str(transp).strip().upper()
+                                msg.append(f"\n📍 <b>{nome_transp} ({qtd})</b>")
+                                for p in lista_placas:
+                                    msg.append(f"   • <code>{p}</code>")
+                        else:
+                            msg.append("\n⚠️ Coluna 'Transportadora' não encontrada no histórico.")
+                    else:
+                        msg.append("\n✅ <i>Nenhuma restituição de transportadora pendente.</i>")
+                else:
+                    msg.append("\n⚠️ Colunas necessárias para cálculo de pendência ausentes no Excel.")
+            else:
+                msg.append("\n⚠️ Arquivo de Histórico não encontrado para leitura.")
+
+        except Exception as e:
+            msg.append(f"\n❌ Erro ao calcular pendências: {str(e)}")
+
         async def send(tk, cid, txt):
-            await telegram.Bot(tk).send_message(chat_id=cid, text=txt)
+            bot = telegram.Bot(tk)
+            msg_final = txt
+            if len(msg_final) > 4000:
+                msg_final = msg_final[:4000] + "\n\n(Mensagem cortada por limite de tamanho...)"
+            
+            await bot.send_message(chat_id=cid, text=msg_final, parse_mode='HTML')
+
         asyncio.run(send(token, chat, "\n".join(msg)))
-    except: pass
+        logging.info("Telegram enviado com relatório de pendências.")
+
+    except Exception as e:
+        logging.error(f"Erro ao enviar Telegram: {e}")
 
 def enviar_email_outlook(lista_uploads_sucesso):
     if not lista_uploads_sucesso:
@@ -1090,8 +1170,8 @@ def iniciar_automacao_completa():
             res_final[placa]['falhas'].append("Endereço Transp Inválido")
             continue
 
-        url_rem = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}"
-        url_rest = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}"
+        url_rem = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}/data=!4m2!4m1!3e0"
+        url_rest = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/data=!4m2!4m1!3e0"
 
         remo_ok = False
         val_remo_final = 0.0
