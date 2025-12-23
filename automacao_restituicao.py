@@ -1171,7 +1171,7 @@ def iniciar_automacao_completa():
             res_final[placa]['falhas'].append("Endereço Transp Inválido")
             continue
 
-        url_rem = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}/data=!4m2!4m1!3e0"
+        url_rem = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/{str(end1).replace(' ','+')}/{str(end3).replace(' ','+')}/data=!4m2!4m1!3e0"
         url_rest = f"https://www.google.com/maps/dir/{str(end1).replace(' ','+')}/{str(end3).replace(' ','+')}/{str(end1).replace(' ','+')}/{str(end2).replace(' ','+')}/data=!4m2!4m1!3e0"
 
         remo_ok = False
