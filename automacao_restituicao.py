@@ -838,6 +838,9 @@ def aplicar_calculos_analise(df, lista_placas_processadas=None):
 
         if 'Calculo_cobrança' not in df.columns:
             df['Calculo_cobrança'] = 0.0
+            
+        if 'Transportadora_real' not in df.columns:
+            df['Transportadora_real'] = ""
 
         if lista_placas_processadas:
             filtro = df[COLUNA_PLACA].isin(lista_placas_processadas)
@@ -847,6 +850,11 @@ def aplicar_calculos_analise(df, lista_placas_processadas=None):
         if 'Tipo_Restituicao' in df.columns:
             df.loc[filtro, 'Teste'] = df.loc[filtro, 'Tipo_Restituicao'].astype(str).str.strip().apply(
                 lambda x: 1 if x == "Transportadora" else 0
+            )
+
+        if 'Transportadora' in df.columns:
+            df.loc[filtro, 'Transportadora_real'] = df.loc[filtro].apply(
+                lambda row: row['Transportadora'] if row.get('Teste', 0) == 1 else "", axis=1
             )
         
         def calc_cobranca(row):
