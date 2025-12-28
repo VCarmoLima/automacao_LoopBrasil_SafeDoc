@@ -19,6 +19,7 @@ import warnings
 warnings.filterwarnings("ignore", message=".*pandas only supports SQLAlchemy.*")
 
 from dotenv import load_dotenv
+from automacao_sig import iniciar_automacao_sig
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -1286,6 +1287,12 @@ def iniciar_automacao_completa():
 
         atualizar_planilha_base_status(placas_para_aprovar)
 
+    logging.info("Iniciando lançamentos automáticos no SIG...")
+    try:
+        iniciar_automacao_sig()
+    except Exception as e:
+        logging.error(f"Erro ao rodar módulo SIG: {e}")
+    
     logging.info("FIM DO PROCESSO.")
 
 if __name__ == "__main__":
